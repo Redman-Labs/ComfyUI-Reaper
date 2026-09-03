@@ -1,0 +1,298 @@
+// LoRA Loader Reaper - DOM build (pure) + CSS + height math. No event listeners
+// here; interaction.mjs attaches ONE delegated handler on the widget element and
+// dispatches on the data-act attributes this module stamps. index.js owns sizing
+// and calls renderNode().
+
+import { redAsset } from "../shared/api_url.mjs";
+import { isVueNodes } from "../shared/nodes2.mjs";
+import { BRAND, readState, accentOf, countOn, MAX_LORAS } from "./core.mjs";
+import { hasLora } from "./api.mjs";
+
+// Height constants - kept in lockstep with the CSS so the node hugs its content
+// with no bottom gap and no scrollbar (getMinHeight in index.js reads contentHeight).
+const PAD = 9;
+const ADD_H = 28;
+const TOP_GAP = 5;
+const TOPROW_H = 26;
+const AFTER_TOP = 9;
+export const ROW_H = 32;
+const ROW_GAP = 6;
+const EMPTY_H = 46;
+
+// The Add/All/gear cluster ("band"). In CLASSIC it FLOATS up out of flow into the
+// empty band between the input dots (left) and output dots (right) - see the offset
+// + reserves below - so it costs zero node height. In Nodes 2.0 (where floating a
+// child above the widget top gets clipped by the node body) it stays in normal flow
+// at the top. Branch is in renderNode.
+const BAND_H = ADD_H + TOP_GAP + TOPROW_H; // 59
+// Classic float: node-local px. The widget body starts ~66px below the node top; the
+// 3-output slot band spans ~4..64, so lift the band ~62px to land it in that band.
+// NOTE: these are calibrated to this node's slot layout (2 inputs / 3 outputs) - if a
+// MODEL/CLIP/triggers slot is ever added or removed, re-tune these AND `CHROME` in
+// index.js, or the band drifts out of the dead-band.
+const CLASSIC_BAND_TOP = -62;
+const CLASSIC_RSV_L = 64;   // clear the model / clip labels on the left
+const CLASSIC_RSV_R = 80;   // clear the MODEL / CLIP / triggers labels on the right
+
+export function contentHeight(state) {
+  const n = state.loras.length;
+  const rowsH = n ? n * ROW_H + (n - 1) * ROW_GAP : EMPTY_H;
+  const bandInFlow = isVueNodes() ? BAND_H + AFTER_TOP : 0; // Classic floats it (free)
+  return PAD + bandInFlow + rowsH + PAD;
+}
+
+const NO_LORAS = "(put LoRAs in models/loras)";
+function baseName(name) {
+  if (!name) return "";
+  const i = name.replace(/\\/g, "/").lastIndexOf("/");
+  return i < 0 ? name : name.slice(i + 1);
+}
+
+// Strip a trailing KNOWN model extension only (allowlist, not "everything after the
+// last dot") so a versioned name like "MoXin_v1.0" keeps its ".0". Used for display
+// only - the row's title keeps the real file name.
+const LORA_EXT_RE = /\.(safetensors|safetensor|ckpt|pt|pth|bin|sft)$/i;
+function displayName(name, hideExt) {
+  const b = baseName(name);
+  return hideExt ? b.replace(LORA_EXT_RE, "") : b;
+}
+
+// One weight box: a typeable value + a ▲▼ spinner. `which` is "m" (model) or "c"
+// (clip); the data-act values let the delegated handler know which strength to set.
+function weightBox(value, which) {
+  const w = document.createElement("div");
+  w.className = "red-ll-w";
+  const val = document.createElement("input");
+  val.className = "red-ll-wval";
+  val.dataset.act = which === "c" ? "wcval" : "wval";
+  val.type = "text";
+  val.value = Number(value).toFixed(2);
+  val.title = which === "c" ? "Clip strength" : "Strength - type a value or use the arrows";
+  const spin = document.createElement("div");
+  spin.className = "red-ll-wspin";
+  const up = document.createElement("button");
+  up.className = "red-ll-wbtn"; up.dataset.act = which === "c" ? "wcinc" : "winc"; up.textContent = "▲"; up.tabIndex = -1;
+  const dn = document.createElement("button");
+  dn.className = "red-ll-wbtn"; dn.dataset.act = which === "c" ? "wcdec" : "wdec"; dn.textContent = "▼"; dn.tabIndex = -1;
+  spin.append(up, dn);
+  w.append(val, spin);
+  return w;
+}
+
+export function injectCSS() {
+  if (document.getElementById("red-ll-css")) return;
+  const s = document.createElement("style");
+  s.id = "red-ll-css";
+  s.textContent = `
+    .red-ll-root { width:100%; box-sizing:border-box; background:#1d1d1d; border-radius:4px;
+      color:#ddd; font-family:ui-sans-serif,system-ui,sans-serif; font-size:12px; position:relative; }
+    /* Plain block flow (NOT flex, NOT absolute) so the list can never be squeezed
+       (Sizes Pattern #4). Each child takes its natural height. */
+    .red-ll-inner { box-sizing:border-box; padding:${PAD}px; }
+
+    /* The Add / All / gear cluster. Floated (Classic) = lifted out of flow into the
+       slot dead-band; in-flow (Nodes 2.0) = a normal top cluster. */
+    .red-ll-band { display:flex; flex-direction:column; gap:${TOP_GAP}px; }
+    .red-ll-band:not(.floated) { margin-bottom:${AFTER_TOP}px; }
+    .red-ll-band.floated { position:absolute; pointer-events:none; z-index:2; }
+    .red-ll-band.floated > * { pointer-events:auto; }
+
+    .red-ll-add { box-sizing:border-box; width:100%; height:${ADD_H}px; border:0; border-radius:6px;
+      background:var(--acc,${BRAND}); color:#fff; font:600 12px 'Segoe UI',sans-serif; cursor:pointer;
+      display:flex; align-items:center; justify-content:center; gap:6px; }
+    .red-ll-add:hover { filter:brightness(1.08); }
+    .red-ll-add:disabled { opacity:.4; cursor:default; filter:none; }
+
+    .red-ll-toprow { display:flex; align-items:stretch; gap:6px; height:${TOPROW_H}px; }
+    .red-ll-all { flex:1; min-width:0; display:flex; align-items:center; gap:8px;
+      background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.14); border-radius:5px;
+      padding:0 9px; color:#a8a8a8; cursor:pointer; user-select:none; }
+    .red-ll-all:hover { border-color:var(--acc,${BRAND}); color:#ddd; }
+    .red-ll-all .cnt { font-size:12px; white-space:nowrap; }
+    .red-ll-gear { flex:0 0 auto; width:32px; display:flex; align-items:center; justify-content:center;
+      background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.14); border-radius:5px;
+      cursor:pointer; user-select:none; }
+    /* The bundled gear SVG as a mask, NOT the ⚙ emoji: an emoji is drawn by the
+       operating system, so it is a different shape on Windows, Mac and Linux and
+       on some of them it arrives in color. This is the same icon as the gear on
+       the node selection toolbar and on Dropdown Reaper. */
+    .red-ll-gear::before { content:""; display:block; width:14px; height:14px; background:#bbb;
+      -webkit-mask:url("${redAsset("icons/note/gear.svg")}") center/contain no-repeat;
+      mask:url("${redAsset("icons/note/gear.svg")}") center/contain no-repeat; }
+    .red-ll-gear:hover { border-color:var(--acc,${BRAND}); }
+    .red-ll-gear:hover::before { background:var(--acc,${BRAND}); }
+
+    .red-ll-rows { display:flex; flex-direction:column; gap:${ROW_GAP}px; }
+    .red-ll-row { box-sizing:border-box; height:${ROW_H}px; display:flex; align-items:center; gap:6px;
+      background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:6px;
+      padding:0 6px; }
+    .red-ll-row.off { opacity:.42; }
+
+    .red-ll-name { flex:1; min-width:0; height:24px; display:flex; align-items:center; gap:5px;
+      background:#161616; border:1px solid #3a3a3a; border-radius:5px; padding:0 8px;
+      font:11px monospace; color:#ddd; cursor:pointer; overflow:hidden; }
+    .red-ll-name:hover { border-color:var(--acc,${BRAND}); }
+    .red-ll-name .nm { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .red-ll-name.empty .nm { color:#777; }
+    .red-ll-name.missing .nm { color:#e05555; }
+    .red-ll-name.missing::before { content:"⚠"; flex:none; color:#e05555; font-size:11px; }
+    .red-ll-name .car { flex:none; color:#777; font-size:10px; }
+
+    .red-ll-w { flex:0 0 auto; display:flex; align-items:center; height:24px; width:56px;
+      background:#161616; border:1px solid #3a3a3a; border-radius:5px; overflow:hidden; }
+    .red-ll-w:focus-within { border-color:var(--acc,${BRAND}); }
+    .red-ll-wval { flex:1; min-width:0; width:100%; background:transparent; border:0; outline:none;
+      color:#fff; text-align:center; font:11px monospace; padding:0; }
+    .red-ll-wval::-webkit-outer-spin-button,.red-ll-wval::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+    .red-ll-wspin { flex:0 0 auto; display:flex; flex-direction:column; width:15px; height:100%;
+      border-left:1px solid #3a3a3a; }
+    .red-ll-wbtn { flex:1; border:0; background:transparent; color:#9a9a9a; cursor:pointer;
+      font-size:7px; line-height:1; display:flex; align-items:center; justify-content:center; padding:0; }
+    .red-ll-wbtn:hover { color:var(--acc,${BRAND}); background:rgba(255,255,255,0.06); }
+
+    .red-ll-info { flex:0 0 auto; width:22px; height:22px; border-radius:5px;
+      border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.05); color:#a8a8a8;
+      cursor:pointer; display:flex; align-items:center; justify-content:center;
+      font:italic 12px Georgia,serif; }
+    .red-ll-info:hover { border-color:var(--acc,${BRAND}); color:#fff; }
+
+    .red-ll-sw { flex:0 0 auto; width:30px; height:16px; border-radius:99px; background:#3a3a3a;
+      position:relative; cursor:pointer; border:1px solid #000; }
+    .red-ll-sw::after { content:""; position:absolute; top:1px; left:1px; width:12px; height:12px;
+      border-radius:50%; background:#8a8a8a; transition:left .14s, background .14s; }
+    .red-ll-sw.on { background:var(--acc,${BRAND}); }
+    .red-ll-sw.on::after { left:15px; background:#fff; }
+
+    .red-ll-empty { box-sizing:border-box; height:${EMPTY_H}px;
+      display:flex; align-items:center; justify-content:center; text-align:center; color:#777;
+      font-size:11px; background:rgba(0,0,0,0.2); border:1px dashed #3a3a3a; border-radius:6px; padding:0 10px; }
+  `;
+  document.head.appendChild(s);
+}
+
+export function ensureRoot(node) {
+  const held = node._redLlRoot;
+  if (held && held.isConnected) { node._redLlRootMounted = true; return held; }
+  const w = (node.widgets || []).find((x) => x.name === "loras_ui");
+  const el = w?.element;
+  const elRoot = el?.classList?.contains?.("red-ll-root") ? el : el?.querySelector?.(".red-ll-root");
+  if (elRoot) { node._redLlRoot = elRoot; node._redLlRootMounted = true; return elRoot; }
+  // Paint into a not-yet-connected root ONLY on the first paint (before it mounts, so
+  // it shows the moment it does). If it was mounted before and is now lost + can't be
+  // re-resolved, return null so renderNode no-ops instead of painting a detached
+  // corpse - it re-resolves on the next event/poll.
+  return node._redLlRootMounted ? null : (held || null);
+}
+
+export function renderNode(node) {
+  const root = ensureRoot(node);
+  if (!root) return;
+  let inner = root.querySelector(".red-ll-inner");
+  if (!inner) {
+    inner = document.createElement("div");
+    inner.className = "red-ll-inner";
+    root.appendChild(inner);
+  }
+  node._redLlInner = inner;
+
+  const st = readState(node);
+  const acc = accentOf(node);
+  inner.style.setProperty("--acc", acc);
+  inner.innerHTML = "";
+
+  // ── the Add / All / gear band (floats into the slot dead-band in Classic) ──
+  const band = document.createElement("div");
+  band.className = "red-ll-band";
+  const classic = !isVueNodes();
+  if (classic) {
+    band.classList.add("floated");
+    band.style.top = CLASSIC_BAND_TOP + "px";
+    band.style.left = CLASSIC_RSV_L + "px";
+    band.style.right = CLASSIC_RSV_R + "px";
+  }
+
+  const add = document.createElement("button");
+  add.className = "red-ll-add";
+  add.dataset.act = "add";
+  add.textContent = "＋ Add LoRA";
+  add.disabled = st.loras.length >= MAX_LORAS;
+  add.title = st.loras.length >= MAX_LORAS ? `Up to ${MAX_LORAS} LoRAs per node` : "Add a LoRA row";
+  band.appendChild(add);
+
+  // ── All on/off + count, and the gear ─────────────────────────────────────
+  const on = countOn(st), total = st.loras.length;
+  const toprow = document.createElement("div");
+  toprow.className = "red-ll-toprow";
+  const all = document.createElement("div");
+  all.className = "red-ll-all";
+  all.dataset.act = "allToggle";
+  all.title = "Turn every LoRA on or off";
+  const asw = document.createElement("span");
+  asw.className = "red-ll-sw" + (total && on === total ? " on" : "");
+  const cnt = document.createElement("span");
+  cnt.className = "cnt";
+  cnt.textContent = total ? `${on} / ${total} on` : "no LoRAs";
+  all.append(asw, cnt);
+  const gear = document.createElement("div");
+  gear.className = "red-ll-gear";
+  gear.dataset.act = "gear";
+  // No textContent: the icon is drawn by the ::before mask above.
+  gear.title = "LoRA Loader settings";
+  toprow.append(all, gear);
+  band.appendChild(toprow);
+  inner.appendChild(band);
+
+  // ── rows, or the empty state ─────────────────────────────────────────────
+  if (!st.loras.length) {
+    const empty = document.createElement("div");
+    empty.className = "red-ll-empty";
+    empty.textContent = "No LoRAs yet — click ＋ Add LoRA to stack your first one.";
+    inner.appendChild(empty);
+    return;
+  }
+
+  const rows = document.createElement("div");
+  rows.className = "red-ll-rows";
+  for (const e of st.loras) {
+    const row = document.createElement("div");
+    row.className = "red-ll-row" + (e.on ? "" : " off");
+    row.dataset.id = e.id;
+
+    const name = document.createElement("div");
+    // hasLora returns null while the list is unknown (first load in flight) so a
+    // slow fetch can't flash a false "missing" mark; the setup/refresh repaint
+    // re-renders once the list lands. A row whose file is gone (renamed/removed)
+    // is SKIPPED at run time with only a console line, so this mark is the one
+    // place the user can actually SEE that the LoRA is not being applied.
+    const missing = e.name ? hasLora(e.name) === false : false;
+    name.className = "red-ll-name" + (e.name ? "" : " empty") + (missing ? " missing" : "");
+    name.dataset.act = "name";
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = e.name ? displayName(e.name, st.hideExt) : NO_LORAS;
+    nm.title = missing
+      ? e.name + " - file not found (renamed or removed?). This row is skipped; pick the file again."
+      : (e.name || "Pick a LoRA");
+    const car = document.createElement("span"); car.className = "car"; car.textContent = "▾";
+    name.append(nm, car);
+
+    const wm = weightBox(e.sm, "m");
+
+    const info = document.createElement("div");
+    info.className = "red-ll-info";
+    info.dataset.act = "info";
+    info.textContent = "i";
+    info.title = "Info + pick trigger words";
+
+    const sw = document.createElement("div");
+    sw.className = "red-ll-sw" + (e.on ? " on" : "");
+    sw.dataset.act = "toggle";
+    sw.title = e.on ? "On - click to turn off" : "Off - click to turn on";
+
+    row.append(name, wm);
+    if (!st.linkStrength) row.appendChild(weightBox(e.sc, "c")); // separate model/clip
+    row.append(info, sw);
+    rows.appendChild(row);
+  }
+  inner.appendChild(rows);
+}

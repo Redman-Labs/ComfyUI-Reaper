@@ -1,0 +1,966 @@
+// ╔═══════════════════════════════════════════════════════════════╗
+// ║  Reaper Text Editor Panel (compact v2 layout)              ║
+// ║  Properties UI for ONE text overlay.                         ║
+// ║  Mounted twice: on the node body AND in the editor sidebar.  ║
+// ║                                                              ║
+// ║  Self-contained CSS (no dependency on .rdx-overlay scope)    ║
+// ║  so the body panel looks the same as inside the editor.      ║
+// ║  Mirrors js/load_image/ui.mjs styling for consistency        ║
+// ║  with other Reaper nodes.                                  ║
+// ║                                                              ║
+// ║  v2 design: no section headers, number inputs in a 2-column  ║
+// ║  grid (larger value text, more compact than sliders), Font   ║
+// ║  picker shows the font name in its own typeface so users     ║
+// ║  recognise the control without a FONT label, etc.            ║
+// ╚═══════════════════════════════════════════════════════════════╝
+
+import { getFontCatalog, loadFontForLayer } from "./fonts.mjs";
+import { openReaperColorPickerModal } from "../shared/color_picker.mjs";
+import { redAsset } from "../shared/api_url.mjs";
+// The font popup + its CSS live in js/shared/font_picker.mjs so Run Timer's
+// clock-font picker is the SAME control, not a copy that drifts (2026-08-16).
+import { openFontPopup, injectFontPickerCSS } from "../shared/font_picker.mjs";
+
+const BRAND = "#f66744";
+
+/** Create the text editor panel.
+ *  @param {Object} opts
+ *  @param {HTMLElement} opts.mount  - container to render into
+ *  @param {Function} opts.onChange  - called with (layer) on any property change
+ *  @param {Function} [opts.onReset] - called with (layer) when Reset is clicked
+ *  @returns {{ setLayer(layer), setCanvasBounds(w,h), destroy() }}
+ */
+export function createTextEditorPanel({ mount, onChange, onReset, onAlignCanvas, composerMode = false, watermarkMode = false }) {
+  injectCSS();
+  let currentLayer = null;
+  let suspendChange = false;
+  let fontCatalog = null;
+
+  const root = document.createElement("div");
+  // composerMode mounts in a narrow sidebar — force single-column grids so the
+  // number/color cells get full width and don't clip (see .red-to-narrow CSS).
+  root.className = "red-to-root" + (composerMode ? " red-to-narrow" : "");
+  mount.appendChild(root);
+
+  function fireChange() {
+    if (suspendChange || !currentLayer) return;
+    onChange(currentLayer);
+  }
+  function layerNow() { return currentLayer; }
+
+  const ui = {};
+
+  // Text content
+  ui.textArea = el("textarea", "red-to-textarea");
+  ui.textArea.placeholder = "Your text here";
+  root.appendChild(ui.textArea);
+  ui.textArea.addEventListener("input", () => { const l = layerNow(); if (l) l.text = ui.textArea.value; fireChange(); });
+  ui.textArea.addEventListener("keydown", (e) => e.stopImmediatePropagation());
+
+  // Font picker + Bold/Italic toggles in one row. The font dropdown grows
+  // to fill, B and I sit on the right as compact square toggle buttons.
+  // Drop the "Regular" button: B off == regular, so a separate Regular chip
+  // would be redundant. B and I are independent toggles, both can be on.
+  const fontRow = el("div", "red-to-font-row");
+  root.appendChild(fontRow);
+
+  ui.fontDropdown = el("div", "red-to-dropdown red-to-dropdown-grow");
+  ui.fontDropdown.innerHTML = `<span class="name">Roboto</span><span class="arrow">${chevronDown()}</span>`;
+  ui.fontDropdownName = ui.fontDropdown.querySelector(".name");
+  ui.fontDropdown.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openFontPopup(ui.fontDropdown, {
+      catalog: fontCatalog || [],
+      currentId: layerNow()?.font || "Roboto",
+      onPick: (id) => {
+        const l = layerNow(); if (!l) return;
+        l.font = id;
+        ui.fontDropdownName.textContent = labelForFont(fontCatalog, id);
+        ui.fontDropdownName.style.fontFamily = `"Pix-${id}", system-ui`;
+        fireChange();
+      },
+      onCatalog: (cat) => {
+        fontCatalog = cat;
+        const l = layerNow();
+        if (l) ui.fontDropdownName.textContent = labelForFont(cat, l.font);
+      },
+    });
+  });
+  fontRow.appendChild(ui.fontDropdown);
+
+  ui.boldBtn = chipBtn("B", "red-to-style-btn red-to-bold-btn", () => {
+    const l = layerNow(); if (!l) return;
+    l.weight = l.weight === 700 ? 400 : 700;
+    ui.boldBtn.classList.toggle("active", l.weight === 700);
+    fireChange();
+  });
+  ui.boldBtn.title = "Bold";
+  fontRow.appendChild(ui.boldBtn);
+
+  ui.italicBtn = chipBtn("I", "red-to-style-btn red-to-italic-btn", () => {
+    const l = layerNow(); if (!l) return;
+    l.italic = !l.italic;
+    ui.italicBtn.classList.toggle("active", l.italic);
+    fireChange();
+  });
+  ui.italicBtn.title = "Italic";
+  fontRow.appendChild(ui.italicBtn);
+
+  // Text align: 3 icon buttons. This aligns the LINES *within* the text
+  // block relative to each other (left / centered / right) - it does NOT
+  // move the text on the canvas. With a single line of text there is no
+  // visible change, which is exactly what confused users in issue #39, so
+  // the caption + the separate "Position on canvas" row below make the
+  // distinction clear.
+  const ALIGN_ICON = {
+    left:   redAsset("icons/ui/align-left.svg"),
+    center: redAsset("icons/ui/align-center-h.svg"),
+    right:  redAsset("icons/ui/align-right.svg"),
+  };
+  // Text direction: Horizontal | Vertical. Vertical stacks each character
+  // top-to-bottom; line breaks become columns (left to right). Sits above the
+  // align row because it changes what align means (lines<->columns).
+  root.appendChild(caption("Text direction"));
+  const dirRow = el("div", "red-to-dir-row");
+  root.appendChild(dirRow);
+  ui.dirChips = [["horizontal", "Horizontal"], ["vertical", "Vertical"]].map(([val, label]) => {
+    const b = el("button", "red-to-chip red-to-dir-chip");
+    b.type = "button";
+    b.dataset.dir = val;
+    b.textContent = label;
+    b.title = val === "vertical"
+      ? "Stack characters top-to-bottom; new lines make columns (left to right)"
+      : "Normal left-to-right horizontal text";
+    b.addEventListener("click", () => {
+      const l = layerNow(); if (!l) return;
+      l.direction = val;
+      ui.dirChips.forEach((c) => c.classList.toggle("active", c.dataset.dir === val));
+      fireChange();
+    });
+    dirRow.appendChild(b);
+    return b;
+  });
+
+  root.appendChild(caption("Text align (within block)"));
+  const alignRow = el("div", "red-to-row3");
+  root.appendChild(alignRow);
+  ui.alignChips = ["left", "center", "right"].map((a) => {
+    const b = el("button", "red-to-chip red-to-align-chip");
+    b.type = "button"; b.dataset.align = a; b.title = `Text align ${a} (lines within the text block)`;
+    const img = document.createElement("img");
+    img.src = ALIGN_ICON[a]; img.alt = a; img.draggable = false;
+    b.appendChild(img);
+    b.addEventListener("click", () => {
+      const l = layerNow(); if (!l) return;
+      l.align = a;
+      ui.alignChips.forEach((c) => c.classList.toggle("active", c.dataset.align === a));
+      fireChange();
+    });
+    alignRow.appendChild(b);
+    return b;
+  });
+
+  // Typography + position number inputs, 2-column grid.
+  // Each cell renders [LABEL  value] with the label small/grey on the left
+  // and the value larger/orange on the right, inside a bordered cell.
+  const typoGrid = el("div", "red-to-grid2");
+  root.appendChild(typoGrid);
+  ui.sizeInput    = inputCell(typoGrid, "Size",          8,  512,   96, 1,   (v) => { const l = layerNow(); if (l) { l.fontSize = v;       fireChange(); }});
+  ui.lineInput    = inputCell(typoGrid, "Line height", 0.5,    4,  1.2, 0.1, (v) => { const l = layerNow(); if (l) { l.lineHeight = v;     fireChange(); }});
+  ui.letterInput  = inputCell(typoGrid, "Letter sp",   -10,   50,    0, 0.5, (v) => { const l = layerNow(); if (l) { l.letterSpacing = v;  fireChange(); }});
+  // Opacity + transform (Rotate/X/Y) are omitted in composerMode: the Image
+  // Composer owns position/rotation/opacity via the canvas + layer controls.
+  if (!composerMode) {
+    ui.opacityInput = inputCell(typoGrid, "Opacity",       0,  100,  100, 1,   (v) => { const l = layerNow(); if (l) { l.opacity = v / 100;  fireChange(); }});
+
+    if (watermarkMode) {
+      // Watermark mode: a Pixels / %-width size-unit toggle, then a position
+      // row that puts Rotate + Margin X / Y on the left and a compact 3x3
+      // anchor square (mirrors Load Image's crop anchor) on the right. Sitting
+      // them side by side saves vertical height vs. a separate anchor row.
+      // Margin X / Y are the inset from the anchored edge (replace absolute
+      // X / Y). The renderer is shared with Text Overlay; the node computes the
+      // final x/y from anchor + margin + size mode at render time.
+      buildSizeModeToggle();
+      const posRow = el("div", "red-to-wm-posrow");
+      root.appendChild(posRow);
+      const posFields = el("div", "red-to-wm-posfields");
+      posRow.appendChild(posFields);
+      ui.rotateInput  = inputCell(posFields, "Rotate", -180, 180,  0, 1, (v) => { const l = layerNow(); if (l) { l.rotation = v; fireChange(); }});
+      ui.marginXInput = inputCell(posFields, "Marg X",    0, 4096, 20, 1, (v) => { const l = layerNow(); if (l) { l.marginX  = v; fireChange(); }});
+      ui.marginYInput = inputCell(posFields, "Marg Y",    0, 4096, 20, 1, (v) => { const l = layerNow(); if (l) { l.marginY  = v; fireChange(); }});
+      ui.marginXInput.el.title = "Horizontal inset from the anchored edge, in pixels";
+      ui.marginYInput.el.title = "Vertical inset from the anchored edge, in pixels";
+      buildAnchorGrid(posRow);
+    } else {
+      // Transform row: Rotate + X + Y in a 3-column grid. Keeps the rows
+      // balanced (no empty cell next to Rotate) and saves a row of height.
+      const transformGrid = el("div", "red-to-grid3");
+      root.appendChild(transformGrid);
+      ui.rotateInput = inputCell(transformGrid, "Rotate", -180, 180,  0, 1, (v) => { const l = layerNow(); if (l) { l.rotation = v; fireChange(); }});
+      ui.posXInput   = inputCell(transformGrid, "X",         0, 4096, 0, 1, (v) => { const l = layerNow(); if (l) { l.x = v;        fireChange(); }});
+      ui.posYInput   = inputCell(transformGrid, "Y",         0, 4096, 0, 1, (v) => { const l = layerNow(); if (l) { l.y = v;        fireChange(); }});
+    }
+  }
+
+  // Position on canvas: snap the WHOLE text block to a canvas edge / center.
+  // This is the control most users reach for ("move the text to the left/
+  // middle/right of the image"). Only rendered when the owner provides an
+  // onAlignCanvas callback (the owner knows the canvas dimensions + how to
+  // measure the text bbox). Horizontal trio (left / center / right) + vertical
+  // trio (top / middle / bottom).
+  if (typeof onAlignCanvas === "function") {
+    const POS_ICON = {
+      left:    redAsset("icons/ui/align-left.svg"),
+      centerH: redAsset("icons/ui/align-center-h.svg"),
+      right:   redAsset("icons/ui/align-right.svg"),
+      top:     redAsset("icons/ui/align-top.svg"),
+      centerV: redAsset("icons/ui/align-center-v.svg"),
+      bottom:  redAsset("icons/ui/align-bottom.svg"),
+    };
+    const POS_TITLE = {
+      left: "Move text to left edge", centerH: "Center text horizontally", right: "Move text to right edge",
+      top: "Move text to top edge", centerV: "Center text vertically", bottom: "Move text to bottom edge",
+    };
+    root.appendChild(caption("Position on canvas (whole text)"));
+    const posRow = el("div", "red-to-row6");
+    root.appendChild(posRow);
+    for (const mode of ["left", "centerH", "right", "top", "centerV", "bottom"]) {
+      const b = el("button", "red-to-chip red-to-align-chip");
+      b.type = "button"; b.title = POS_TITLE[mode];
+      const img = document.createElement("img");
+      img.src = POS_ICON[mode]; img.alt = mode; img.draggable = false;
+      b.appendChild(img);
+      b.addEventListener("click", () => {
+        const l = layerNow(); if (!l) return;
+        onAlignCanvas(mode);
+        // Momentary action (snap to position), not a persistent mode like
+        // the text-align chips - so flash orange briefly to acknowledge the
+        // press instead of staying lit.
+        b.classList.add("is-flashing");
+        setTimeout(() => b.classList.remove("is-flashing"), 450);
+      });
+      posRow.appendChild(b);
+    }
+  }
+
+  // Colors: two clickable cells in one row. Each shows [swatch  LABEL  hex].
+  // Click opens the compact color picker.
+  const colorGrid = el("div", "red-to-grid2");
+  root.appendChild(colorGrid);
+  ui.textColorCell = colorCell(colorGrid, "Text",   "#FFFFFF",
+    () => layerNow()?.color || "#FFFFFF",
+    (c) => {
+      const l = layerNow(); if (!l || !c) return;
+      l.color = c;
+      ui.textColorCell.setValue(c);
+      fireChange();
+    },
+    /* withClear= */ false,
+  );
+  ui.bgColorCell = colorCell(colorGrid, "Behind", null,
+    () => layerNow()?.bgColor || "#000000",
+    (c) => {
+      const l = layerNow(); if (!l) return;
+      l.bgColor = c || null;
+      ui.bgColorCell.setValue(c || null);
+      fireChange();
+    },
+    /* withClear= */ true,
+  );
+
+  // Reset to defaults: centered chip the same size as one of the align
+  // buttons. Lives in a 3-column row so it sits in the middle column.
+  if (onReset) {
+    const resetRow = el("div", "red-to-reset-row");
+    const resetBtn = el("button", "red-to-reset-btn");
+    resetBtn.type = "button";
+    resetBtn.textContent = "RESET";
+    resetBtn.title = "Restore all settings to their defaults";
+    resetBtn.addEventListener("click", () => {
+      const l = layerNow(); if (!l) return;
+      onReset(l);
+      setLayer(l);
+      fireChange();
+    });
+    resetRow.appendChild(resetBtn);
+    root.appendChild(resetRow);
+  }
+
+  // Load font catalog. Only the CURRENT font is eagerly loaded (for the
+  // dropdown label); popup rows load their own face lazily on scroll.
+  getFontCatalog().then(async (cat) => {
+    fontCatalog = cat;
+    if (currentLayer) {
+      ui.fontDropdownName.textContent = labelForFont(cat, currentLayer.font);
+      ui.fontDropdownName.style.fontFamily = `"Pix-${currentLayer.font}", system-ui`;
+      if (cat.some((f) => f.id === currentLayer.font)) {
+        loadFontForLayer(currentLayer.font, currentLayer.weight ?? 400, !!currentLayer.italic).catch(() => {});
+      }
+    }
+  }).catch((e) => console.warn("[text_editor] font catalog load failed", e));
+
+  // ── watermark-mode builders (hoisted; called from the !composerMode block) ──
+
+  // Pixels / %-width size-unit toggle. In % mode the Size field is read as a
+  // percentage of each image's width (consistent across mixed-size batches).
+  function buildSizeModeToggle() {
+    const row = el("div", "red-to-sizemode");
+    const segPx  = el("button", "red-to-seg"); segPx.type  = "button"; segPx.textContent  = "Pixels";  segPx.title  = "Size in pixels";
+    const segPct = el("button", "red-to-seg"); segPct.type = "button"; segPct.textContent = "% width"; segPct.title = "Size as a percentage of each image's width (good for mixed-size batches)";
+    row.append(segPx, segPct);
+    root.appendChild(row);
+    function apply(mode, fromUser) {
+      segPx.classList.toggle("active", mode === "px");
+      segPct.classList.toggle("active", mode === "pct");
+      if (ui.sizeInput) ui.sizeInput.setRange(mode === "pct" ? 1 : 4, mode === "pct" ? 100 : 2048);
+      if (fromUser) {
+        const l = layerNow(); if (!l) return;
+        let v = l.fontSize;
+        if (mode === "pct" && (!(v >= 1) || v > 100)) v = 10;   // px value would be nonsense as a %
+        if (mode === "px"  && !(v >= 4)) v = 64;                 // % value would be tiny as px
+        l.sizeMode = mode;
+        l.fontSize = v;
+        if (ui.sizeInput) ui.sizeInput.setValue(v);
+        fireChange();
+      }
+    }
+    segPx.addEventListener("click", () => apply("px", true));
+    segPct.addEventListener("click", () => apply("pct", true));
+    ui.applySizeMode = apply;
+  }
+
+  // Compact 3x3 anchor square (mirrors Load Image's crop anchor). Grid
+  // position == image position (top-left cell = top-left anchor); the chosen
+  // cell stays orange. Appended into the caller's parent so it can sit beside
+  // the Rotate / Margin inputs.
+  function buildAnchorGrid(parent) {
+    const grid = el("div", "red-to-anchor");
+    grid.title = "Watermark position";
+    const ANCHORS = [
+      ["top-left", "Top left"],     ["top-center", "Top center"],     ["top-right", "Top right"],
+      ["middle-left", "Middle left"], ["center", "Center"],            ["middle-right", "Middle right"],
+      ["bottom-left", "Bottom left"], ["bottom-center", "Bottom center"], ["bottom-right", "Bottom right"],
+    ];
+    ui.anchorCells = ANCHORS.map(([id, title]) => {
+      const c = el("div", "red-to-anchor-cell"); c.dataset.anchor = id; c.title = title;
+      c.addEventListener("click", () => {
+        const l = layerNow(); if (!l) return;
+        l.anchor = id;
+        ui.anchorCells.forEach((x) => x.classList.toggle("active", x.dataset.anchor === id));
+        fireChange();
+      });
+      grid.appendChild(c);
+      return c;
+    });
+    parent.appendChild(grid);
+  }
+
+  function setLayer(layer) {
+    currentLayer = layer;
+    suspendChange = true;
+    try {
+      if (!layer) { root.classList.add("red-to-empty"); return; }
+      root.classList.remove("red-to-empty");
+      ui.textArea.value = layer.text ?? "";
+      const fontId = layer.font ?? "Roboto";
+      ui.fontDropdownName.textContent = labelForFont(fontCatalog, fontId);
+      ui.fontDropdownName.style.fontFamily = `"Pix-${fontId}", system-ui`;
+      ui.boldBtn.classList.toggle("active", (layer.weight ?? 400) === 700);
+      ui.italicBtn.classList.toggle("active", !!layer.italic);
+      if (ui.dirChips) ui.dirChips.forEach((c) => c.classList.toggle("active", c.dataset.dir === (layer.direction ?? "horizontal")));
+      ui.alignChips.forEach((c) => c.classList.toggle("active", c.dataset.align === (layer.align ?? "center")));
+      ui.sizeInput.setValue(layer.fontSize ?? 96);
+      ui.lineInput.setValue(layer.lineHeight ?? 1.2);
+      ui.letterInput.setValue(layer.letterSpacing ?? 0);
+      // These four are absent in composerMode — guard each.
+      ui.opacityInput && ui.opacityInput.setValue(Math.round((layer.opacity ?? 1) * 100));
+      ui.rotateInput && ui.rotateInput.setValue(layer.rotation ?? 0);
+      ui.posXInput && ui.posXInput.setValue(layer.x ?? 0);
+      ui.posYInput && ui.posYInput.setValue(layer.y ?? 0);
+      ui.textColorCell.setValue(layer.color ?? "#FFFFFF");
+      ui.bgColorCell.setValue(layer.bgColor || null);
+      // Watermark-mode controls (present only when watermarkMode === true).
+      if (ui.applySizeMode) ui.applySizeMode(layer.sizeMode === "pct" ? "pct" : "px", false);
+      ui.marginXInput && ui.marginXInput.setValue(layer.marginX ?? 20);
+      ui.marginYInput && ui.marginYInput.setValue(layer.marginY ?? 20);
+      if (ui.anchorCells) {
+        const a = layer.anchor ?? "bottom-right";
+        ui.anchorCells.forEach((c) => c.classList.toggle("active", c.dataset.anchor === a));
+      }
+    } finally {
+      suspendChange = false;
+    }
+  }
+
+  /** Set position input ranges based on the canvas dimensions. */
+  function setCanvasBounds(canvasWidth, canvasHeight) {
+    // No-op in composerMode (no position inputs).
+    if (!ui.posXInput || !ui.posYInput) return;
+    ui.posXInput.setRange(-canvasWidth, canvasWidth * 2);
+    ui.posYInput.setRange(-canvasHeight, canvasHeight * 2);
+  }
+
+  /** Lock or unlock the text textarea. Used by the editor + body panel
+   *  when the Text Overlay node has its `text` input wired - the
+   *  upstream value overrides whatever the user types here, so disable
+   *  the field to avoid silent edits being thrown away. Pass a hint
+   *  string to show under the textarea while locked. */
+  function setTextReadOnly(isReadOnly, hint) {
+    ui.textArea.readOnly = !!isReadOnly;
+    ui.textArea.classList.toggle("red-to-textarea-locked", !!isReadOnly);
+    ui.textArea.title = isReadOnly && hint ? hint : "";
+    if (!ui.textLockHint) {
+      ui.textLockHint = el("div", "red-to-text-lockhint");
+      ui.textArea.after(ui.textLockHint);
+    }
+    ui.textLockHint.textContent = isReadOnly && hint ? hint : "";
+    ui.textLockHint.style.display = isReadOnly && hint ? "block" : "none";
+  }
+
+  function destroy() { root.remove(); }
+
+  return { setLayer, setCanvasBounds, setTextReadOnly, destroy };
+}
+
+// ── stateless helpers ─────────────────────────────────────────────────────────
+
+function el(tag, className) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  return e;
+}
+
+// Small grey row caption used to disambiguate the two align controls
+// ("Text align" vs "Position on canvas"). Kept intentionally tiny so it
+// doesn't read like a heavy section header (v2 panel is header-light).
+function caption(text) {
+  const c = el("div", "red-to-caption");
+  c.textContent = text;
+  return c;
+}
+
+function chipBtn(text, className, onClick) {
+  const b = el("button", className);
+  b.type = "button";
+  b.textContent = text;
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function chevronDown() {
+  // Single-character chevron, same as Load Image's .arrow
+  return "▾";
+}
+
+function labelForFont(catalog, id) {
+  if (!catalog) return id || "Roboto";
+  const f = catalog.find((x) => x.id === id);
+  return f?.label || id || "Roboto";
+}
+
+// One cell in the 2-column number-input grid. Returns { el, input, setValue, setRange }.
+// Layout: [LABEL  value  ▲/▼] inside a single bordered box.
+// The input is type=text (not number) so users can type math expressions
+// like "100+12" or "512*2" — evaluated on blur/Enter via safeMathEval.
+// Live onChange still fires while typing plain numbers (so the preview
+// updates as you type), but math expressions wait for commit.
+// +/- spinner buttons mirror Load Image's red-li-spin pattern (Shift = 10x).
+function inputCell(parent, label, min, max, value, step, onChange) {
+  let curMin = min, curMax = max;
+  let currentValue = value;
+
+  const cell = el("div", "red-to-input-cell");
+  const lbl = el("span", "red-to-input-label"); lbl.textContent = label;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.inputMode = "decimal";
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  input.className = "red-to-input-val";
+  input.value = fmtStep(value, step);
+  input.title = "Math allowed: 100+12, 512*2, (1024+128)/2";
+
+  const spin = el("div", "red-to-spin");
+  const upBtn = el("button", "red-to-spin-up");   upBtn.type = "button";   upBtn.tabIndex = -1;
+  const downBtn = el("button", "red-to-spin-down"); downBtn.type = "button"; downBtn.tabIndex = -1;
+  spin.append(upBtn, downBtn);
+  cell.append(lbl, input, spin);
+
+  function clamp(v) { return Math.max(curMin, Math.min(curMax, v)); }
+
+  function commit() {
+    const raw = safeMathEval(input.value);
+    const v = Number.isFinite(raw) ? clamp(roundToStep(raw, step)) : currentValue;
+    input.value = fmtStep(v, step);
+    if (v !== currentValue) {
+      currentValue = v;
+      onChange(v);
+    }
+  }
+
+  function step1(dir, mult) {
+    const raw = safeMathEval(input.value);
+    const base = Number.isFinite(raw) ? raw : currentValue;
+    const next = clamp(roundToStep(base + dir * step * mult, step));
+    input.value = fmtStep(next, step);
+    currentValue = next;
+    onChange(next);
+  }
+
+  upBtn.addEventListener("mousedown",   (e) => { e.preventDefault(); e.stopPropagation(); step1(+1, e.shiftKey ? 10 : 1); });
+  downBtn.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); step1(-1, e.shiftKey ? 10 : 1); });
+
+  // Live update while typing a plain number, so the canvas preview tracks
+  // typing. For math expressions (with operators), wait for blur/Enter.
+  input.addEventListener("input", () => {
+    if (/^-?\d+(\.\d+)?$/.test(input.value.trim())) {
+      const v = parseFloat(input.value);
+      if (Number.isFinite(v)) {
+        currentValue = v;
+        onChange(v);
+      }
+    }
+  });
+  input.addEventListener("blur", commit);
+  input.addEventListener("keydown", (e) => {
+    e.stopImmediatePropagation();
+    if (e.key === "Enter") { e.preventDefault(); input.blur(); return; }
+    if (e.key === "Tab") { commit(); return; }
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      step1(e.key === "ArrowUp" ? 1 : -1, e.shiftKey ? 10 : 1);
+    }
+  });
+
+  parent.appendChild(cell);
+  return {
+    el: cell, input,
+    setValue(v) { currentValue = v; input.value = fmtStep(v, step); },
+    setRange(mn, mx) { curMin = mn; curMax = mx; },
+  };
+}
+
+// Whitelist-only math eval. Accepts only digits, + - * / ( ) . and
+// whitespace; everything else returns NaN. Uses the Function constructor
+// inside strict mode for evaluation.
+function safeMathEval(expr) {
+  if (typeof expr !== "string") return NaN;
+  const s = expr.trim();
+  if (!s) return NaN;
+  if (!/^[\d+\-*/().\s]+$/.test(s)) return NaN;
+  try {
+    const v = Function(`"use strict"; return (${s});`)();
+    return typeof v === "number" && Number.isFinite(v) ? v : NaN;
+  } catch {
+    return NaN;
+  }
+}
+
+// Round v to the precision implied by step (step=0.1 -> 1 decimal, step=1 -> int).
+function roundToStep(v, step) {
+  if (!step) return v;
+  const decimals = (String(step).split(".")[1] || "").length;
+  const m = Math.pow(10, decimals);
+  return Math.round(v * m) / m;
+}
+
+// Format v as a string with the precision implied by step.
+function fmtStep(v, step) {
+  if (!step) return String(v);
+  const decimals = (String(step).split(".")[1] || "").length;
+  return decimals ? Number(v).toFixed(decimals) : String(Math.round(v));
+}
+
+// One cell in the colors grid. Returns { el, setValue }.
+// setValue(hex) updates the swatch; setValue(null) for "no pill" shows
+// the checker pattern + "(none)" text.
+function colorCell(parent, label, initialHex, getInitial, onPick, withClear) {
+  const cell = el("div", "red-to-color-cell");
+  cell.title = `${label} color`;
+  const swatch = el("div", "red-to-color-cell-swatch");
+  const lbl = el("span", "red-to-input-label"); lbl.textContent = label;
+  const val = el("span", "red-to-color-cell-val");
+  cell.append(swatch, lbl, val);
+  parent.appendChild(cell);
+
+  function setValue(hex) {
+    if (hex && /^#[0-9a-fA-F]{6}$/.test(hex)) {
+      swatch.style.background = hex;
+      swatch.classList.remove("red-to-swatch-checker");
+      val.textContent = hex.toUpperCase();
+    } else {
+      swatch.style.background = "";
+      swatch.classList.add("red-to-swatch-checker");
+      val.textContent = "(none)";
+    }
+  }
+  setValue(initialHex);
+
+  cell.addEventListener("click", (e) => {
+    e.stopPropagation();
+    // Open the full Photoshop-style picker MODAL (swatches + SV plane +
+    // hue strip + hex input + Apply / Cancel). Modal backdrop locks the
+    // page so the popup can't be moved out from under you by clicking on
+    // the node body or canvas (the issue with the compact popup).
+    openReaperColorPickerModal({
+      title: label === "Behind" ? "Behind (background) color" : `${label} color`,
+      initialColor: getInitial(),
+      showClear: withClear,
+      onPick: (c) => onPick(c),
+    });
+  });
+
+  return { el: cell, setValue };
+}
+
+// ── CSS injection (once per page) ─────────────────────────────────────────────
+
+let _cssInjected = false;
+function injectCSS() {
+  if (_cssInjected) return; _cssInjected = true;
+  // The .red-to-popup* rules moved to js/shared/font_picker.mjs with the popup
+  // itself; pull them in here so this panel still styles its own font dropdown.
+  injectFontPickerCSS();
+  const s = document.createElement("style"); s.id = "red-to-css";
+  s.textContent = `
+    .red-to-root {
+      box-sizing: border-box;
+      padding: 8px;
+      background: #2a2a2a;
+      border-radius: 4px;
+      color: #ddd;
+      font: 11px ui-sans-serif, system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .red-to-root * { box-sizing: border-box; }
+    .red-to-empty::after { content:"Select a layer to edit"; color:#666; font-style:italic; }
+
+    .red-to-textarea {
+      width: 100%;
+      background: #1d1d1d;
+      color: #fff;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 6px 8px;
+      font: 12px ui-sans-serif, system-ui, sans-serif;
+      resize: vertical;
+      min-height: 44px;
+    }
+    .red-to-textarea:focus { outline: none; border-color: var(--red-acc,#f66744); }
+    .red-to-textarea-locked {
+      color: #666 !important;
+      background: #1a1a1a !important;
+      cursor: not-allowed;
+      font-style: italic;
+    }
+    .red-to-text-lockhint {
+      font: 10px ui-sans-serif, system-ui, sans-serif;
+      color: var(--red-acc,#f66744);
+      letter-spacing: 0.3px;
+      margin-top: -2px;
+      margin-bottom: 2px;
+    }
+
+    .red-to-dropdown {
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 7px 10px;
+      font: 13px ui-sans-serif, system-ui, sans-serif;
+      color: #ddd;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      user-select: none;
+    }
+    .red-to-dropdown:hover { border-color: #666; }
+    .red-to-dropdown .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .red-to-dropdown .arrow { color: var(--red-acc,#f66744); font-size: 11px; margin-left: 6px; }
+
+    /* Font row: dropdown grows, B + I toggle buttons on the right */
+    .red-to-font-row {
+      display: flex;
+      gap: 4px;
+      align-items: stretch;
+    }
+    .red-to-dropdown-grow { flex: 1; min-width: 0; }
+
+    /* Bold / Italic toggle buttons. Square chips, single letter, orange
+       background when active, grey when off. */
+    .red-to-style-btn {
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      color: #888;
+      cursor: pointer;
+      width: 36px;
+      flex-shrink: 0;
+      font: 700 14px ui-sans-serif, system-ui, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .red-to-style-btn:hover { border-color: #666; color: #ddd; }
+    .red-to-style-btn.active { background: var(--red-acc,#f66744); color: #fff; border-color: var(--red-acc,#f66744); }
+    .red-to-italic-btn { font-style: italic; font-family: serif; }
+
+    /* Small row caption (disambiguates Text align vs Position on canvas) */
+    .red-to-caption {
+      font: 10px ui-sans-serif, system-ui, sans-serif;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin: 2px 0 -2px 1px;
+    }
+
+    /* Align row: 3 icon chips, full width */
+    .red-to-row3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 3px;
+    }
+    /* Position-on-canvas row: 6 icon chips (H trio + V trio) */
+    .red-to-row6 {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 3px;
+    }
+
+    .red-to-chip {
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      color: #aaa;
+      cursor: pointer;
+      padding: 5px 0;
+      font: 600 11px ui-sans-serif, system-ui, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 26px;
+    }
+    .red-to-chip:hover { border-color: #666; color: #ddd; }
+    .red-to-chip.active { background: var(--red-acc,#f66744); color: #fff; border-color: var(--red-acc,#f66744); }
+    /* Brief click acknowledgement for the momentary "Position on canvas"
+       buttons (they have no persistent active state). */
+    .red-to-chip.is-flashing { background: var(--red-acc,#f66744); border-color: var(--red-acc,#f66744); }
+    /* Direction row: 2 chips. Reuse .red-to-chip (hover/active/height) so the
+       row visually matches the align row directly below it; this class only
+       sets the 2-column grid. */
+    .red-to-dir-row { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
+    .red-to-align-chip img {
+      width: 14px; height: 14px;
+      pointer-events: none;
+      filter: brightness(0) saturate(100%) invert(75%);
+    }
+    .red-to-align-chip.active img,
+    .red-to-align-chip.is-flashing img { filter: brightness(0) invert(1); }
+
+    /* 2-column grid for number inputs + colors. minmax(0,1fr) lets columns
+       shrink below their content min-size so cells never overflow the panel. */
+    .red-to-grid2 {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 4px;
+    }
+    /* 3-column grid used by the Rotate / X / Y row */
+    .red-to-grid3 {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+      gap: 4px;
+    }
+    /* Narrow (composer sidebar) — stack to one column so every cell gets full
+       width and the longer labels (LINE HEIGHT / LETTER SP / BEHIND) fit. */
+    .red-to-narrow .red-to-grid2 { grid-template-columns: 1fr; }
+
+    /* Numeric input cell: [LABEL  value  spin]. Matches Load Image's
+       .red-li-numinput: the cell STRETCHES its children (align-items:stretch)
+       so the spinner column fills the full cell height and its chevrons render
+       cleanly. No padding on the cell itself - the label and input supply
+       their own, the spin column sits flush against the right border. */
+    .red-to-input-cell {
+      display: flex;
+      align-items: center;   /* center label + value; the spin column stretches itself */
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      min-height: 28px;
+      overflow: hidden;   /* clip the recessed spinner column to the rounded corner */
+    }
+    .red-to-input-cell:focus-within { border-color: var(--red-acc,#f66744); }
+    .red-to-input-label {
+      display: flex;
+      align-items: center;
+      padding-left: 8px;
+      font: 10px ui-sans-serif, system-ui, sans-serif;
+      color: var(--red-acc,#f66744);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      flex-shrink: 0;
+    }
+    .red-to-input-val {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--red-acc,#f66744);
+      font: 600 13px ui-sans-serif, system-ui, sans-serif;
+      line-height: 1.2;   /* explicit vertical centering (don't rely on input auto-center) */
+      text-align: right;
+      width: 100%;
+      min-width: 0;
+      padding: 0 6px;
+      -moz-appearance: textfield;
+    }
+    .red-to-input-val::-webkit-outer-spin-button,
+    .red-to-input-val::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+    /* Spinner column: SOLID filled triangle glyphs (literal ▲ ▼ chars - never
+       a \\25B2 CSS escape, which throws inside this template literal). No
+       divider, transparent buttons, so the field reads as one uniform dark box
+       (mirrors the Image Resize / Load Image spinner). Stretches full cell
+       height via the cell's align-items:stretch. */
+    .red-to-spin {
+      display: flex;
+      flex-direction: column;
+      width: 16px;
+      flex-shrink: 0;
+      align-self: stretch;   /* full cell height even though the cell centers its items */
+    }
+    .red-to-spin > button {
+      flex: 1;
+      background: transparent;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      color: #aaa;
+      position: relative;
+      outline: none;
+    }
+    .red-to-spin > button:hover { color: var(--red-acc,#f66744); }
+    .red-to-spin-up::before,
+    .red-to-spin-down::before {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 8px;
+      line-height: 1;
+    }
+    .red-to-spin-up::before   { content: "▲"; }
+    .red-to-spin-down::before { content: "▼"; }
+
+    /* Color cell: [swatch LABEL hex]. Tightened so a 7-char hex (#000000)
+       fits the half-width 2-column layout without overflowing under the
+       LABEL — the cell only ever showed the short "(none)" before, which
+       masked the cramping. */
+    .red-to-color-cell {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 4px 6px;
+      cursor: pointer;
+      min-height: 28px;
+      overflow: hidden;   /* clip to rounded corner; the freed space below keeps the hex from ever reaching here */
+    }
+    .red-to-color-cell:hover { border-color: #666; }
+    .red-to-color-cell-swatch {
+      width: 15px; height: 15px;
+      border-radius: 3px;
+      border: 1px solid #555;
+      flex-shrink: 0;
+      background: #fff;
+    }
+    /* The shared input-label adds its own left padding (for numeric cells);
+       inside a color cell the cell already pads, so zero it out and shrink
+       the type a touch to give the hex value its room. */
+    .red-to-color-cell .red-to-input-label {
+      padding-left: 0;
+      font-size: 9px;
+      letter-spacing: 0.2px;
+    }
+    .red-to-color-cell-val {
+      flex: 1;
+      min-width: 0;
+      text-align: right;
+      white-space: nowrap;
+      font: 600 11px ui-sans-serif, system-ui, sans-serif;
+      color: var(--red-acc,#f66744);
+      letter-spacing: 0;
+    }
+    .red-to-swatch-checker {
+      background: repeating-conic-gradient(#333 0% 25%, #444 0% 50%) 0 0 / 8px 8px !important;
+    }
+
+    /* Reset row: 3-column grid so the button sits centered (middle
+       column) and matches the width of a single align chip. */
+    .red-to-reset-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 3px;
+    }
+    .red-to-reset-btn {
+      grid-column: 2;
+      background: var(--red-acc,#f66744);
+      border: 1px solid var(--red-acc,#f66744);
+      border-radius: 4px;
+      color: #fff;
+      padding: 5px 0;
+      cursor: pointer;
+      font: 600 11px ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0.5px;
+      min-height: 26px;
+    }
+    .red-to-reset-btn:hover { background: #ff7e5a; border-color: #ff7e5a; }
+
+    /* Watermark: Pixels / %-width size-unit toggle (2-segment) */
+    .red-to-sizemode { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
+    .red-to-seg {
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      color: #aaa;
+      cursor: pointer;
+      padding: 5px 0;
+      font: 600 11px ui-sans-serif, system-ui, sans-serif;
+      min-height: 26px;
+    }
+    .red-to-seg:hover { border-color: #666; color: #ddd; }
+    .red-to-seg.active { background: var(--red-acc,#f66744); color: #fff; border-color: var(--red-acc,#f66744); }
+
+    /* Watermark position row: Rotate + Margin X/Y on the left, compact 3x3
+       anchor square on the right (mirrors Load Image's crop anchor). */
+    .red-to-wm-posrow { display: flex; gap: 6px; align-items: stretch; }
+    .red-to-wm-posfields { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+    .red-to-anchor {
+      flex: none;
+      width: 92px;
+      aspect-ratio: 1;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      grid-template-rows: repeat(3, 1fr);
+      gap: 3px;
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 5px;
+      padding: 5px;
+      box-sizing: border-box;
+    }
+    .red-to-anchor-cell {
+      background: rgba(255, 255, 255, 0.07);
+      border-radius: 2px;
+      cursor: pointer;
+      transition: background 0.08s;
+    }
+    .red-to-anchor-cell:hover { background: rgba(255, 255, 255, 0.18); }
+    .red-to-anchor-cell.active { background: var(--red-acc,#f66744); }
+  `;
+  document.head.appendChild(s);
+}

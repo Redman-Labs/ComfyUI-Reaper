@@ -1,0 +1,12 @@
+# PyTorch, NumPy, Pillow, and safetensors support are provided by ComfyUI.
+color-matcher>=0.6.0
+kornia>=0.7.0
+mediapipe>=0.10.13
+onnxruntime>=1.17
+scikit-image>=0.22
+scipy>=1.11
+transformers>=4.38
+ultralytics>=8.0
+psutil>=5.9
+nvidia-ml-py>=12.0
+pyspellchecker>=0.8.0

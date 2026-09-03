@@ -1,0 +1,703 @@
+"""Shared geometry + mask + blend helpers for Inpaint Crop / Inpaint Stitch
+Reaper.
+
+This module is the SINGLE Python source of truth for the inpaint region math.
+`js/inpaint_crop/geometry.mjs` mirrors `compute_region` 1:1 so the editor's live
+crop-rectangle preview matches what the node actually produces. The narrative
+spec is `docs/inpaint-crop-math.md` - update the doc first, then BOTH
+implementations, then eyeball-verify the editor preview against a real run.
+
+Zero extra dependencies: torch + PIL + numpy all come from ComfyUI's environment.
+scipy is used ONLY for true hole-filling when present; a PIL morphological close
+is the fallback (wrapped in try/except per the offline-first rule).
+"""
+
+import math
+import numpy as np
+import torch
+from PIL import Image, ImageFilter
+
+try:
+    from scipy import ndimage as _ndimage  # optional, for true binary_fill_holes
+    _HAS_SCIPY = True
+except Exception:
+    _ndimage = None
+    _HAS_SCIPY = False
+
+# IMPORTING scipy successfully is NOT proof that scipy WORKS here. A scipy built or
+# written against numpy 1.x imports fine and then raises deep inside a call once the
+# user upgrades to numpy 2 - reported from the wild as
+#   [ReaperInpaintCrop] crop error: Alias 'bool8' was removed in NumPy 2.0.
+# which comes out of a library we merely CALL (this plugin's own code has never
+# contained that name). An import-time flag cannot see that, so every scipy call is
+# also wrapped at CALL time and falls back to the pure PIL/numpy path that is already
+# written here for the no-scipy case. The failure LATCHES for the session, so a bad
+# install costs one warning rather than an exception per mask.
+_SCIPY_DEAD = False
+
+
+def _scipy_ok():
+    return _HAS_SCIPY and _ndimage is not None and not _SCIPY_DEAD
+
+
+def _scipy_call(name, *args, **kwargs):
+    """Run ONE scipy call. Returns (True, result), or (False, None) after latching the
+    fallback on.
+
+    ONLY the scipy call itself is inside the try. Surrounding numpy/PIL work must never
+    be able to arm the latch: a MemoryError in our own np.bincount would otherwise
+    disable scipy for the whole session across all three call sites and print a warning
+    blaming scipy for something it did not do.
+    """
+    if not _scipy_ok():
+        return False, None
+    try:
+        return True, getattr(_ndimage, name)(*args, **kwargs)
+    except Exception as e:
+        _scipy_failed("ndimage." + name, e)
+        return False, None
+
+
+def _scipy_failed(where, err):
+    global _SCIPY_DEAD
+    if not _SCIPY_DEAD:
+        _SCIPY_DEAD = True
+        print(
+            f"[Reaper] scipy is installed but unusable here - {type(err).__name__}: {err} "
+            f"(raised from {where}). Using the built-in mask code instead for the rest of "
+            f"this session; results are near-identical. If you recently upgraded NumPy, "
+            f"reinstalling scipy for that NumPy version clears this."
+        )
+
+
+# Must match the constant emitted by node_inpaint_crop.py / consumed by
+# node_inpaint_stitch.py - and it is deliberately the SAME string the Image Crop
+# / Image Uncrop pair uses, so the two pairs are cross-compatible. Duplicated as a
+# plain string (no cross-file import chain), exactly like node_crop / node_uncrop.
+REAPER_CROP_INFO = "REAPER_CROP_INFO"
+
+_RESAMPLE = {
+    "lanczos": Image.LANCZOS,
+    "bicubic": Image.BICUBIC,
+    "bilinear": Image.BILINEAR,
+    "nearest": Image.NEAREST,
+}
+
+# Default knob values. The JS DEFAULT_STATE in js/inpaint_crop/index.js MUST stay
+# in sync with these (same risk class as every other Reaper node).
+DEFAULTS = {
+    "size_mode": "keep",        # keep | force | free
+    "target": 1024,             # long-side target for keep mode
+    "target_w": 1024,           # force mode
+    "target_h": 1024,           # force mode
+    "multiple": 8,              # 8 | 16 | 32 | 64
+    "context_px": 24,           # absolute padding added each side
+    "context_pct": 10.0,        # extra padding as a fraction of the bbox (total %)
+    "mask_grow": 4,             # dilate the mask before measuring the bbox
+    "mask_blur": 4,             # soften the OUTPUT mask edge (conditioning), px
+    "blend": 16,                # seam feather px (stitch); also grows the crop context
+    "invert_mask": False,       # flip the mask (1 - mask) before cropping
+    "fill_holes": True,
+    "min_size": 256,
+    "max_size": 2048,
+    "resample": "lanczos",
+    "allow_upscale": True,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# small utils
+
+def _round_mult(v, m):
+    m = max(1, int(m))
+    return int(max(m, round(float(v) / m) * m))
+
+
+def _clampi(v, lo, hi):
+    return int(max(lo, min(hi, int(round(v)))))
+
+
+def merge_params(p):
+    """Fill any missing keys from DEFAULTS and coerce types."""
+    out = dict(DEFAULTS)
+    if isinstance(p, dict):
+        out.update({k: p[k] for k in p if k in DEFAULTS})
+    out["size_mode"] = str(out["size_mode"]).lower()
+    if out["size_mode"] not in ("keep", "force", "free"):
+        out["size_mode"] = "keep"
+    out["resample"] = str(out["resample"]).lower()
+    if out["resample"] not in _RESAMPLE:
+        out["resample"] = "lanczos"
+    for k in ("target", "target_w", "target_h", "multiple", "context_px",
+              "mask_grow", "mask_blur", "blend", "min_size", "max_size"):
+        out[k] = int(round(float(out[k])))
+    out["context_pct"] = float(out["context_pct"])
+    out["fill_holes"] = bool(out["fill_holes"])
+    out["allow_upscale"] = bool(out["allow_upscale"])
+    out["invert_mask"] = bool(out["invert_mask"])
+    out["multiple"] = max(1, out["multiple"])
+    out["min_size"] = max(8, out["min_size"])
+    out["max_size"] = max(out["min_size"], out["max_size"])
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mask helpers (numpy float HxW, 1 = the area to inpaint)
+
+def mask_to_np(mask, h, w):
+    """Coerce a ComfyUI MASK ([1,H,W] / [H,W]) to a float HxW numpy in 0..1,
+    resized to (h, w) if needed. None -> all zeros."""
+    if mask is None:
+        return np.zeros((h, w), dtype=np.float32)
+    m = mask
+    if isinstance(m, torch.Tensor):
+        if m.dim() == 4:
+            m = m[:, 0] if m.shape[1] == 1 else m[..., 0]
+        if m.dim() == 3:
+            m = m[0]
+        m = m.detach().cpu().float().clamp(0, 1).numpy()
+    m = np.asarray(m, dtype=np.float32)
+    if m.ndim != 2:
+        return np.zeros((h, w), dtype=np.float32)
+    if m.shape != (h, w):
+        pim = Image.fromarray((np.clip(m, 0, 1) * 255).astype(np.uint8), "L")
+        pim = pim.resize((w, h), Image.NEAREST)
+        m = np.asarray(pim, dtype=np.float32) / 255.0
+    return np.clip(m, 0.0, 1.0)
+
+
+def _max1d(a, k):
+    """1D max filter along axis 1, odd window k, edge-padded. Separable building
+    block for a fast box dilation: O(W*H*k) instead of PIL MaxFilter's O(W*H*k^2),
+    which hung for ~50s on a large mask_grow."""
+    r = k // 2
+    ap = np.pad(a, ((0, 0), (r, r)), mode="edge")
+    win = np.lib.stride_tricks.sliding_window_view(ap, k, axis=1)
+    return win.max(axis=2)
+
+
+def _dilate(m_bool, px):
+    if px <= 0:
+        return m_bool
+    k = 2 * int(px) + 1
+    # separable max filter -> O(W*H), fast even for a huge kernel
+    ok, filtered = _scipy_call("maximum_filter", m_bool, size=k)
+    if ok:
+        return filtered > 0
+    # no-scipy: two separable numpy max passes (rows then cols)
+    a = m_bool.astype(np.uint8)
+    a = _max1d(a, k)
+    a = _max1d(np.ascontiguousarray(a.T), k).T
+    return a > 0
+
+
+def fill_holes(m_bool):
+    """Fill only SMALL enclosed holes (paint specks / gaps), NEVER a large
+    subject-shaped hole. A cut-out / background mask (white around a subject) would
+    otherwise have its subject hole filled by scipy's binary_fill_holes, collapsing
+    the mask to solid - the "mask vanishes after the crop" bug. scipy when available
+    (size-limited true fill); otherwise a PIL morphological close (small kernel,
+    already naturally limited to small holes)."""
+    ok, filled = _scipy_call("binary_fill_holes", m_bool)
+    if ok:
+        try:
+            added = filled & ~m_bool          # pixels binary_fill_holes would fill
+            if not added.any():
+                return filled
+            # keep only holes up to a small fraction of the image (specks/gaps); a
+            # subject hole is far bigger and is left UNfilled so the mask survives.
+            H, W = m_bool.shape
+            limit = max(256, int(0.005 * H * W))   # ~0.5% of the image
+            ok2, labelled = _scipy_call("label", added)
+            if ok2:
+                lbl = labelled[0]
+                sizes = np.bincount(lbl.ravel())
+                small = np.where(sizes <= limit)[0]
+                small = small[small != 0]          # drop label 0 (the non-hole area)
+                return m_bool | np.isin(lbl, small)
+        except Exception:
+            # OUR numpy arithmetic failed, not scipy's. Fall back for THIS mask only and
+            # leave scipy alive for the next one - latching here would blame scipy and
+            # silently downgrade dilate + feather for the rest of the session.
+            pass
+    pim = Image.fromarray((m_bool * 255).astype(np.uint8), "L")
+    k = 9
+    pim = pim.filter(ImageFilter.MaxFilter(k)).filter(ImageFilter.MinFilter(k))
+    return np.asarray(pim, dtype=np.uint8) > 127
+
+
+def gaussian_blur_np(m, px):
+    if px <= 0:
+        return m
+    pim = Image.fromarray((np.clip(m, 0, 1) * 255).astype(np.uint8), "L")
+    pim = pim.filter(ImageFilter.GaussianBlur(radius=float(px)))
+    return np.asarray(pim, dtype=np.float32) / 255.0
+
+
+def preprocess_mask(m, p):
+    """fill-holes + grow on a 0..1 float mask -> a float mask used for the bbox
+    AND carried full-frame into crop_info (the stitch blend feathers it)."""
+    mb = m > 0.5
+    if p["fill_holes"]:
+        mb = fill_holes(mb)
+    if p["mask_grow"] > 0:
+        mb = _dilate(mb, p["mask_grow"])
+    return mb.astype(np.float32)
+
+
+def mask_bbox(m_bool):
+    ys, xs = np.where(m_bool)
+    if xs.size == 0:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def resolve_inpaint_mask(disk_mask, upstream_mask):
+    """Choose which mask the crop uses: the editor-painted mask saved on disk, or
+    the wired upstream MASK input.
+
+    The editor mask wins ONLY when it actually has painted pixels. Clearing the
+    editor (or saving without painting) writes an all-black mask file while
+    mask_path stays set, so a naive "disk mask wins whenever present" lets that
+    empty mask silently override a wired mask - the crop then sees no painted area
+    and falls back to the whole image (the reported bug). So an empty/absent editor
+    mask falls back to the wired mask. This is what makes the `mask` input tooltip
+    true: clear it or never paint, and the wired mask is used as-is. Returns the
+    chosen mask tensor, or None when neither has content."""
+    if (isinstance(disk_mask, torch.Tensor) and disk_mask.numel()
+            and float(disk_mask.detach().max()) > 1e-6):
+        return disk_mask
+    if isinstance(upstream_mask, torch.Tensor):
+        return upstream_mask
+    return disk_mask
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE GEOMETRY (mirror of js/inpaint_crop/geometry.mjs)
+
+def compute_region(bbox, W, H, p):
+    """From a mask bbox (x0,y0,x1,y1) and the image size, return the source crop
+    region + the model-friendly output size.
+
+    Returns {rx, ry, rw, rh, out_w, out_h}. `r*` are integer SOURCE pixels (the
+    rectangle that gets cropped); `out_*` is the size the crop is resized to (and
+    the node's width/height outputs). If bbox is None the whole image is used.
+    """
+    p = merge_params(p)
+    W = int(W); H = int(H)
+    if bbox is None:
+        x0, y0, x1, y1 = 0, 0, W, H
+    else:
+        x0, y0, x1, y1 = bbox
+    bw = max(1.0, float(x1 - x0))
+    bh = max(1.0, float(y1 - y0))
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+
+    # context expand: max(context_px, blend) each side + context_pct of bbox total.
+    # The max-with-blend (Option B) gives the seam feather room to reach 0 INSIDE the
+    # crop, so a big softness grows the crop instead of being clamped at stitch time.
+    ctx = max(p["context_px"], p["blend"])
+    rw = bw + 2.0 * ctx + bw * p["context_pct"] / 100.0
+    rh = bh + 2.0 * ctx + bh * p["context_pct"] / 100.0
+
+    mode = p["size_mode"]
+    mult = p["multiple"]
+
+    # force mode: grow the WANTED region to the target aspect first (the output is
+    # the fixed target size, set below).
+    tw = th = 0
+    if mode == "force":
+        tw = max(mult, _round_mult(p["target_w"], mult))
+        th = max(mult, _round_mult(p["target_h"], mult))
+        target_aspect = tw / float(th)
+        if rw / rh < target_aspect:
+            rw = rh * target_aspect
+        else:
+            rh = rw / target_aspect
+
+    # place + clamp the SOURCE region inside the image
+    rw_i = max(1, min(int(round(rw)), W))
+    rh_i = max(1, min(int(round(rh)), H))
+    if mode == "force":
+        # keep the source aspect == the target aspect after the image-bound clamp
+        # (which can clip one axis and not the other), so the resize never stretches.
+        aspect = tw / float(th)
+        if rw_i > rh_i * aspect:
+            rw_i = max(1, int(round(rh_i * aspect)))
+        else:
+            rh_i = max(1, int(round(rw_i / aspect)))
+    rx = _clampi(cx - rw_i / 2.0, 0, W - rw_i)
+    ry = _clampi(cy - rh_i / 2.0, 0, H - rh_i)
+
+    # output size is derived from the CLAMPED source rect (rw_i, rh_i), NOT the
+    # un-clamped wanted region - so the crop is resized at its real aspect and is
+    # NEVER stretched when the image edge clipped the region (e.g. a big softness on
+    # a mask near the border: the source clamps to the image, so the output must too,
+    # or the crop/mask comes out squished).
+    if mode == "force":
+        out_w, out_h = tw, th
+    elif mode == "free":
+        # free = "multiple only": keep the cropped rect's own size, just round to the
+        # multiple. When the LONG side exceeds max_size, scale BOTH axes by one factor
+        # (not each axis independently) so the output keeps the source aspect - an
+        # independent per-axis cap stretched a wide/tall crop. No min_size bump (free
+        # preserves the source size; only the max ceiling applies).
+        ow, oh = float(rw_i), float(rh_i)
+        big = max(ow, oh)
+        if big > p["max_size"]:
+            k = p["max_size"] / big
+            ow *= k; oh *= k
+        out_w = _round_mult(ow, mult)
+        out_h = _round_mult(oh, mult)
+    else:  # keep shape: scale the CROPPED rect's long side to target, keep aspect
+        long_side = max(rw_i, rh_i)
+        s = p["target"] / long_side if long_side > 0 else 1.0
+        if not p["allow_upscale"]:
+            s = min(s, 1.0)
+        ow = rw_i * s
+        oh = rh_i * s
+        # min_size bump FIRST (scale both up so the short side reaches min_size),
+        # then the max_size clamp LAST as the hard ceiling - so an extreme-aspect
+        # crop can't blow the long side past max_size into an OOM tensor (the short
+        # side may then end up < min_size, which is acceptable).
+        small = min(ow, oh)
+        if small < p["min_size"]:
+            k = p["min_size"] / small
+            ow *= k; oh *= k
+        big = max(ow, oh)
+        if big > p["max_size"]:
+            k = p["max_size"] / big
+            ow *= k; oh *= k
+        out_w = _round_mult(ow, mult)
+        out_h = _round_mult(oh, mult)
+
+    out_w = max(mult, int(out_w))
+    out_h = max(mult, int(out_h))
+    return {"rx": rx, "ry": ry, "rw": rw_i, "rh": rh_i,
+            "out_w": out_w, "out_h": out_h}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# image / mask resize (PIL for quality + Lanczos support)
+
+def resize_image_tensor(t, w, h, resample="lanczos"):
+    """[B,H,W,3] float 0..1 -> [B,h,w,3]. PIL per frame (handles Lanczos).
+    Short-circuits when the size already matches so an identity crop stays
+    pixel-exact (PIL resize to the same size still resamples)."""
+    if int(w) == int(t.shape[2]) and int(h) == int(t.shape[1]):
+        return t
+    filt = _RESAMPLE.get(resample, Image.LANCZOS)
+    frames = []
+    for i in range(int(t.shape[0])):
+        arr = (t[i].clamp(0, 1).cpu().numpy() * 255.0 + 0.5).astype(np.uint8)
+        pim = Image.fromarray(arr, "RGB").resize((int(w), int(h)), filt)
+        frames.append(np.asarray(pim, dtype=np.float32) / 255.0)
+    return torch.from_numpy(np.stack(frames, 0))
+
+
+def resize_mask_np(m, w, h, resample="bilinear"):
+    if int(w) == int(m.shape[1]) and int(h) == int(m.shape[0]):
+        return np.clip(m, 0, 1).astype(np.float32)
+    filt = _RESAMPLE.get(resample, Image.BILINEAR)
+    pim = Image.fromarray((np.clip(m, 0, 1) * 255).astype(np.uint8), "L")
+    pim = pim.resize((int(w), int(h)), filt)
+    return np.asarray(pim, dtype=np.float32) / 255.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CROP (called by node_inpaint_crop.py)
+
+def apply_inpaint_crop(image, mask, p):
+    """image [B,H,W,3], mask [1,H,W]|None, p = knob dict.
+
+    Returns (cropped_image[B,out_h,out_w,3], out_mask[1,out_h,out_w], crop_info,
+    out_w, out_h). out_mask is the conditioning mask (grown + blurred) at output
+    resolution; crop_info carries the full original image + full-frame processed
+    mask so stitch can paste back + produce a full-frame result.
+    """
+    p = merge_params(p)
+    # Coerce the input to RGB. Remove Background Reaper (and any cut-out) hands us a
+    # 4-channel RGBA image; left as-is it rides into crop_info["image"] and makes
+    # Inpaint Stitch throw on the 3-vs-4 channel paste (its except then silently passes
+    # the result through as the "original"). Premultiply RGBA over black so a cut-out
+    # reads as the subject on black (matching the editor/preview), not the leftover
+    # background still sitting under the alpha.
+    if image.shape[-1] == 4:
+        image = (image[..., :3] * image[..., 3:4]).contiguous()
+    elif image.shape[-1] > 4:
+        image = image[..., :3].contiguous()
+    B, H, W = int(image.shape[0]), int(image.shape[1]), int(image.shape[2])
+
+    raw = mask_to_np(mask, H, W)
+    if p["invert_mask"] and mask is not None:
+        raw = 1.0 - raw                       # flip which area is inpainted (Invert toggle)
+    proc = preprocess_mask(raw, p)            # binary core (fill-holes + grow) for the bbox
+    bbox = mask_bbox(proc > 0.5)
+    # Keep the brush's painted soft edge: the filled+grown core is opaque, the
+    # softly-painted rim outside it is preserved (so the soft-edge brush + mask_blur
+    # actually reach the conditioning mask instead of being thresholded away).
+    softm = np.maximum(raw, proc)
+    region = compute_region(bbox, W, H, p)
+    rx, ry, rw, rh = region["rx"], region["ry"], region["rw"], region["rh"]
+    out_w, out_h = region["out_w"], region["out_h"]
+
+    # crop + resize the image (all batch frames, same rect). Keep the result on
+    # the input's device/dtype (the resize routes through PIL on the CPU).
+    crop = image[:, ry:ry + rh, rx:rx + rw, :].contiguous()
+    cropped_image = resize_image_tensor(crop, out_w, out_h, p["resample"]).to(image.device, image.dtype)
+
+    # resize the mask with NEAREST (bilinear would add its own gradient halo);
+    # the mask_blur Gaussian is the ONLY intended softening of the conditioning.
+    mreg = softm[ry:ry + rh, rx:rx + rw]
+    mout = resize_mask_np(mreg, out_w, out_h, "nearest")
+    mout = gaussian_blur_np(mout, p["mask_blur"])
+    out_mask = torch.from_numpy(np.clip(mout, 0, 1)[None, ...].astype(np.float32)).to(image.device)
+
+    # keep the carried mask float32 (NOT image.dtype) so it matches out_mask and a
+    # strict downstream mask op never sees a float16 mask on an fp16 image pipeline.
+    full_mask = torch.from_numpy(softm[None, ...].astype(np.float32)).to(image.device)
+    crop_info = {
+        "image": image, "mask": full_mask,
+        "x": rx, "y": ry, "w": rw, "h": rh,
+        "orig_w": W, "orig_h": H,
+    }
+    return cropped_image, out_mask, crop_info, out_w, out_h
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STITCH (called by node_inpaint_stitch.py)
+
+def _feather_alpha(alpha, feather):
+    """Ramp the alpha to 0 at the rectangle edge over `feather` px (distance-to-
+    edge), so a pasted crop dissolves into the original. Same idea as Image
+    Uncrop's _feather_alpha but operating on an arbitrary [ch,cw] alpha."""
+    k = int(feather)
+    if k <= 0:
+        return alpha
+    ch, cw = int(alpha.shape[-2]), int(alpha.shape[-1])
+    # Cap the feather at ~half the smaller side so the interior stays fully opaque. A
+    # feather wider than that never reaches 1 anywhere, so the WHOLE rectangle paste
+    # goes translucent and ghosts the original through (only bites on a small crop +
+    # big feather, e.g. a large Stitch softness override on a tight crop).
+    k = min(k, max(1, (min(ch, cw) - 1) // 2))
+    ys = torch.arange(ch, dtype=torch.float32).view(ch, 1)
+    xs = torch.arange(cw, dtype=torch.float32).view(1, cw)
+    dist = torch.minimum(torch.minimum(ys, (ch - 1) - ys),
+                         torch.minimum(xs, (cw - 1) - xs))
+    ramp = (dist / float(k)).clamp(0.0, 1.0)
+    return (alpha * ramp).clamp(0.0, 1.0)
+
+
+def _blur_alpha(alpha, blend):
+    """Soften a MASK's edge by `blend` px so the masked paste fades smoothly into
+    the surroundings (mask-aware blend). Distinct from _feather_alpha, which fades
+    the rectangle boundary (whole-crop mode).
+
+    OUTWARD-only feather: alpha is 1.0 everywhere INSIDE the mask and AT its edge,
+    ramping to 0 over `blend` px OUTSIDE. So the new content fully covers the
+    masked area (the old content can NEVER show through at the new object's own
+    edge) and only the transition into the surroundings is softened. A centred
+    feather made the masked edge itself semi-transparent, which read as a soft
+    ghost/halo of the old content. Coverage/grow is the crop node's mask_grow
+    job; this only softens the outer seam.
+
+    The crop node now grows the crop context to max(context_px, blend)
+    (compute_region, Option B), so the mask always sits >= blend px from the crop
+    edge and the outward feather reaches 0 BEFORE the border on its own. That
+    replaced the old rect-edge guard + core-opaque clamp (which crushed a too-wide
+    feather and could ghost a mask near the crop edge); the smoothstep is opaque
+    inside by construction, so no clamp is needed.
+    """
+    k = int(blend)
+    if k <= 0:
+        return alpha
+    a_np = np.clip(alpha.detach().cpu().numpy(), 0.0, 1.0)
+    mb = a_np > 0.5
+    if not mb.any() or mb.all():
+        return torch.from_numpy(a_np.astype(np.float32))
+    soft = None
+    # signed distance to the mask edge (+ inside, - outside, in px). Map so
+    # signed >= 0 -> 1.0 and signed in [-k,0] ramps 1 -> 0 (smoothstep). The two scipy
+    # calls latch on their own; the arithmetic below them is ours and must not.
+    ok_in, d_in = _scipy_call("distance_transform_edt", mb)
+    ok_out, d_out = _scipy_call("distance_transform_edt", ~mb) if ok_in else (False, None)
+    if ok_in and ok_out:
+        try:
+            signed = d_in - d_out
+            t = np.clip(signed / float(k) + 1.0, 0.0, 1.0)
+            soft = (t * t * (3.0 - 2.0 * t)).astype(np.float32)
+        except Exception:
+            # These lines are OURS, so they must not latch (that is the whole point of
+            # narrowing the guards) - but they still need a net, exactly like the one
+            # fill_holes keeps. Two ways to land here: this chain allocates several
+            # full-size float64 temporaries on top of the two distance transforms, so a
+            # big mask under memory pressure fails here; and a scipy that RETURNS a
+            # poisoned array instead of raising fails on the subtraction rather than in
+            # the call - which is precisely the numpy-2 breakage this fallback exists
+            # for. Leaving soft as None hands the mask to the gaussian path below.
+            soft = None
+    if soft is None:
+        # fallback (no scipy): gaussian-blur the binary mask for an outward
+        # falloff, then force the interior back to 1.0 (outward-only).
+        mbf = mb.astype(np.float32)
+        blurred = gaussian_blur_np(mbf, max(1, int(k / 1.7)))
+        soft = np.where(mbf > 0.5, 1.0, blurred).astype(np.float32)
+    return torch.from_numpy(np.clip(soft, 0.0, 1.0).astype(np.float32))
+
+
+def _color_match(patch, ref, region_mask, strength):
+    """Shift patch color stats toward `ref` within the masked area. strength:
+    'subtle' = match mean, 'strong' = match mean + std. patch/ref [ch,cw,3]."""
+    if strength == "off":
+        return patch
+    w = region_mask.reshape(-1, 1)
+    wsum = float(w.sum()) + 1e-6
+    pf = patch.reshape(-1, 3)
+    rf = ref.reshape(-1, 3)
+    pm = (pf * w).sum(0) / wsum
+    rm = (rf * w).sum(0) / wsum
+    if strength == "strong":
+        pv = ((pf - pm) ** 2 * w).sum(0) / wsum
+        rv = ((rf - rm) ** 2 * w).sum(0) / wsum
+        scale = (rv.clamp_min(1e-6).sqrt()) / (pv.clamp_min(1e-6).sqrt())
+        scale = scale.clamp(0.5, 2.0)
+        out = (pf - pm) * scale + rm
+    else:
+        out = pf - pm + rm
+    return out.reshape(patch.shape).clamp(0.0, 1.0)
+
+
+def resolve_seam(crop_info, softness, blend_mode):
+    """Resolve the effective seam feather (px) + blend mode for the stitch, letting
+    the Inpaint Stitch node OVERRIDE what rode in on crop_info from the Crop node -
+    so the blend can be tuned at stitch time WITHOUT re-running the sampler.
+
+    softness: int; < 0 (the -1 "inherit" default) keeps crop_info['blend'].
+    blend_mode: 'from crop' / '' = keep crop_info['blend_mode']; else 'mask' or
+    'whole crop' (spaces -> underscores). Returns (blend:int 0..150, mode:str).
+    """
+    if not isinstance(crop_info, dict):
+        crop_info = {}
+    try:
+        s = int(softness)
+    except (TypeError, ValueError):
+        s = -1
+    if s < 0:
+        try:
+            s = int(crop_info.get("blend", 16))
+        except (TypeError, ValueError):
+            s = 16
+    blend = max(0, min(150, s))
+
+    bm = str(blend_mode if blend_mode is not None else "from crop").strip().lower()
+    if bm in ("", "from crop", "inherit"):
+        bm = str(crop_info.get("blend_mode", "mask"))
+    bm = bm.replace(" ", "_")
+    if bm not in ("mask", "whole_crop"):
+        bm = "mask"
+    return blend, bm
+
+
+def stitch_back(crop_info, image, mask, blend, blend_mode, color_match):
+    """Paste the inpainted `image` back onto crop_info['image'] at the recorded
+    region, blended seamlessly. Returns (result[B,H,W,3], original[B,H,W,3])."""
+    base = crop_info["image"]
+    # defensive RGB coercion: a crop_info from an RGBA source (a hand-built dict, or an
+    # Image Crop fed an RGBA image) would mismatch the RGB patch on the paste below.
+    # Inpaint Crop already coerces its input, so this only catches other sources.
+    if isinstance(base, torch.Tensor) and base.dim() == 4 and base.shape[-1] == 4:
+        base = (base[..., :3] * base[..., 3:4]).contiguous()
+    elif isinstance(base, torch.Tensor) and base.dim() == 4 and base.shape[-1] > 4:
+        base = base[..., :3].contiguous()
+    H, W = int(base.shape[1]), int(base.shape[2])
+    x = _clampi(crop_info.get("x", 0), 0, W - 1)
+    y = _clampi(crop_info.get("y", 0), 0, H - 1)
+    cw = int(max(1, min(int(crop_info.get("w", W)), W - x)))
+    ch = int(max(1, min(int(crop_info.get("h", H)), H - y)))
+
+    patch = image
+    if not isinstance(patch, torch.Tensor) or patch.dim() != 4:
+        patch = base.new_zeros((1, ch, cw, base.shape[3]))
+    if int(patch.shape[1]) != ch or int(patch.shape[2]) != cw:
+        patch = resize_image_tensor(patch, cw, ch, "lanczos").to(base.device, base.dtype)
+
+    # region alpha (1 = take the patch)
+    if blend_mode == "whole_crop":
+        a = torch.ones((ch, cw), dtype=torch.float32)
+    else:  # mask-aware: prefer the wired mask, else the painted mask from crop_info
+        if isinstance(mask, torch.Tensor):
+            # mask_to_np already resizes to (ch,cw) with NEAREST - keep it crisp;
+            # the seam softening is _blur_alpha's job (a bilinear resize here would
+            # smear a second gradient on top of the feather = a visible halo).
+            a = torch.from_numpy(np.ascontiguousarray(mask_to_np(mask, ch, cw), dtype=np.float32))
+        elif isinstance(crop_info.get("mask"), torch.Tensor):
+            fm = mask_to_np(crop_info["mask"], H, W)[y:y + ch, x:x + cw]
+            a = torch.from_numpy(np.ascontiguousarray(fm, dtype=np.float32))
+        else:
+            a = torch.ones((ch, cw), dtype=torch.float32)
+    # whole_crop: fade the rectangle boundary. mask: soften the mask's OWN edge.
+    if blend_mode == "whole_crop":
+        a = _feather_alpha(a.clamp(0, 1), blend)
+    else:
+        ac = a.clamp(0, 1)
+        ab = ac > 0.5
+        if not bool(ab.any()) or bool(ab.all()):
+            # No mask EDGE to soften - an Image Crop crop_info with no per-pixel mask
+            # (all-zeros), an all-ones mask, or a whole-image inpaint with nothing
+            # painted. _blur_alpha would return zeros (paste NOTHING - the inpaint is
+            # lost) or ones (a hard rectangle seam). Fall back to the rectangle feather
+            # over the full crop, so the edited crop IS pasted with a soft seam and the
+            # Softness slider still works for the Image Crop interop.
+            a = _feather_alpha(torch.ones((ch, cw), dtype=torch.float32), blend)
+        else:
+            a = _blur_alpha(ac, blend)
+
+    out = base.clone()
+    B = int(out.shape[0])
+    if patch.shape[0] != B:
+        if patch.shape[0] == 1:
+            patch = patch.repeat(B, 1, 1, 1)
+        elif B == 1:
+            out = out.repeat(patch.shape[0], 1, 1, 1)
+            B = patch.shape[0]
+        else:
+            n = min(B, patch.shape[0])
+            print(f"[ReaperInpaintStitch] batch mismatch: original {B} vs inpainted "
+                  f"{patch.shape[0]} - using {n} frames")
+            out, patch = out[:n], patch[:n]
+            B = n
+    patch = patch.to(out.device, out.dtype)
+
+    if color_match and color_match != "off":
+        patch = patch.clone()   # don't mutate the caller's tensor in place (it may be cached upstream)
+        # Reference = the UNMASKED context (the surroundings OUTSIDE the mask), NOT
+        # the masked area or the whole crop. Matching to anything that includes the
+        # masked area drags the inpaint's DELIBERATELY changed colors back toward the
+        # original (a red->white dress goes pink). Matching to the context corrects
+        # only the lighting/tone drift the model introduced in the unchanged
+        # surroundings, which is what actually makes the seam vanish.
+        am = np.clip(a.detach().cpu().numpy(), 0.0, 1.0)
+        ctx = (am < 0.5).astype(np.float32)
+        if ctx.sum() < 0.02 * ctx.size:   # mask ~fills the crop -> no context to match
+            ctx = np.ones_like(am, dtype=np.float32)
+        ac = torch.from_numpy(np.ascontiguousarray(ctx))
+        for b in range(B):  # match EVERY frame, not just frame 0 (video / batch)
+            region_b = out[b, y:y + ch, x:x + cw, :3].detach().cpu()
+            p_b = patch[b, :, :, :3].detach().cpu()
+            matched = _color_match(p_b, region_b, ac, color_match)
+            patch[b, :, :, :3] = matched.to(patch.device, patch.dtype)
+
+    av = a[None, ..., None].to(out.device, out.dtype)
+    region = out[:, y:y + ch, x:x + cw, :]
+    out[:, y:y + ch, x:x + cw, :] = patch[..., :region.shape[-1]] * av + region * (1.0 - av)
+
+    original = base
+    if original.shape[0] != out.shape[0]:
+        if original.shape[0] == 1:
+            original = original.repeat(out.shape[0], 1, 1, 1)
+        else:
+            # the result was trimmed to min(B,C) above - trim original to match,
+            # or the two outputs would have mismatched batch sizes.
+            original = original[:out.shape[0]]
+    return out.clamp(0, 1), original.clamp(0, 1)

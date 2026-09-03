@@ -1,0 +1,915 @@
+// Load Image (Reaper).
+//
+// It REUSES Load Image's proven picker backend verbatim: the upload / paste /
+// drag-drop / clipspace / native-preview / defensive-cache machinery in ./api.mjs, 
+// so this node sets those fields and gets the whole thing - including Mask Editor
+// and Copy/Paste (Clipspace) - for free. The RESIZE controls live in the gear
+// panel (./settings.mjs), which in turn reuses Load Image's own resize UI. This
+// file only paints the compact face (cards + toolbar + file row + preview) and
+// wires the picks.
+//
+// State lives on node.properties.loadImagePixState (see core.mjs for why that
+// key) and is injected into the hidden LoadImageMiniState input by the
+// graphToPrompt hook at the bottom (Vue Compat #9).
+
+import { app } from "/scripts/app.js";
+import { hideJsonWidget, installResizeFloor, installCanvasZoomPassthrough } from "./index.mjs";
+import { isGraphLoading } from "../shared/graph_loading.mjs";
+import { registerNodeSettings } from "../shared/node_settings.mjs";
+import { applyAdaptiveCanvasOnly, isVueNodes, canvasBackingScale, installZoomRepaint } from "../shared/nodes2.mjs";
+import {
+  setSelectedImage, updateNativePreview, pickAndUploadFile, pasteFromClipboard,
+  uploadImageToInput, splitFilenameSubfolder,
+} from "./api.mjs";
+import { openImageDropdown, injectCSS as injectLiCSS } from "./ui.mjs";
+import { previewResize } from "./resize_modes.mjs";
+import {
+  BRAND, CLASS, DEFAULT_STATE, HIDDEN_INPUT, STATE_PROP,
+  accentOf, readState, writeState,
+} from "./core.mjs";
+import { openMiniSettings, closeMiniSettingsFor } from "./settings.mjs";
+
+const MINI_WIDGET = "reaper_load_image_mini_ui";
+const MIN_W = 250;
+const DEFAULT_W = 286;
+const DEFAULT_H = 300;
+// Nodes 2.0 preview canvas floor (fills any extra node height) + the smaller
+// manual-resize floor so the node can be dragged compact (Load Image pattern).
+const LM_PREVIEW_FILL_MIN = 164;
+const LM_PREVIEW_FLOOR_MIN = 56;
+// INPUT->OUTPUT cards: painted in the LEFT slot dead-space in Classic (like
+// Outpaint), or on a canvas row in Nodes 2.0. CARDS_MID_Y centres them across
+// the two output rows; RIGHT_RESERVE keeps them clear of the right-aligned
+// output labels ("image_info" is the longest).
+const CARDS_H = 36;
+const CARDS_MID_Y = 24;
+const CARDS_LEFT = 12;
+const CARDS_RIGHT_RESERVE = 96;
+// Nodes 2.0: the cards canvas overlaps the output-slot band (via the nudge), so
+// its paint must stop clear of the right-aligned output labels. Measured: the
+// "image_info" slot element is ~108 layout px wide.
+const CARDS_VUE_RIGHT_RESERVE = 108;
+
+let _activeMiniNode = null;
+
+// ── inline icons (self-contained, no dependency on a bundled SVG file) ───────
+const ICONS = {
+  upload: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none"><path d="M12 3l4.2 4.2h-3.2V13h-2V7.2H7.8L12 3z" fill="currentColor"/><path d="M5 14.5V19a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  paste: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none"><rect x="6" y="4.2" width="12" height="16" rx="2.2" stroke="currentColor" stroke-width="2"/><rect x="9" y="2.6" width="6" height="3.4" rx="1.2" fill="currentColor"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M19.4 13a7.8 7.8 0 0 0 .05-1 7.8 7.8 0 0 0-.05-1l2-1.55a.5.5 0 0 0 .12-.62l-1.9-3.28a.5.5 0 0 0-.6-.22l-2.36 1a7 7 0 0 0-1.72-1l-.36-2.5a.5.5 0 0 0-.5-.42h-3.8a.5.5 0 0 0-.5.42l-.36 2.5a7 7 0 0 0-1.72 1l-2.36-1a.5.5 0 0 0-.6.22L2.48 8.2a.5.5 0 0 0 .12.62L4.6 11a7.8 7.8 0 0 0 0 2l-2 1.56a.5.5 0 0 0-.12.62l1.9 3.28a.5.5 0 0 0 .6.22l2.36-1a7 7 0 0 0 1.72 1l.36 2.5a.5.5 0 0 0 .5.42h3.8a.5.5 0 0 0 .5-.42l.36-2.5a7 7 0 0 0 1.72-1l2.36 1a.5.5 0 0 0 .6-.22l1.9-3.28a.5.5 0 0 0-.12-.62L19.4 13zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>',
+};
+
+function injectCSS() {
+  if (document.getElementById("reaper-li-css")) return;
+  const s = document.createElement("style");
+  s.id = "reaper-li-css";
+  s.textContent = `
+    .rl-lm-root { width:100%; box-sizing:border-box; position:relative; background:#2a2a2a;
+      border-radius:4px; color:#ddd; font-family: ui-sans-serif, system-ui, sans-serif; font-size:11px; }
+    .rl-lm-inner { position:absolute; inset:0; overflow:hidden; display:flex; flex-direction:column;
+      gap:7px; padding:6px 8px 8px; box-sizing:border-box; }
+
+    /* INPUT -> OUTPUT size cards. In Classic they are PAINTED in the slot
+       dead-space (onDrawForeground); in Nodes 2.0 this canvas carries the same
+       pixels as a row. display:none in Classic so it takes no body height. */
+    .rl-lm-cards { flex:0 0 auto; width:100%; height:44px; display:block; pointer-events:none; }
+
+    /* Toolbar: [Upload] [paste] [gear], each a proper button that hovers to the
+       node accent with white text (Reaper convention: hover = full accent). */
+    .rl-lm-toolbar { display:flex; align-items:stretch; gap:6px; flex:0 0 auto; flex-wrap:wrap; }
+    .rl-lm-upload { flex:1 1 auto; min-width:104px; display:flex; align-items:center; justify-content:center; gap:8px;
+      background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.14); border-radius:7px;
+      color:var(--rl-lm-acc,${BRAND}); height:34px;
+      font:600 12px ui-sans-serif, system-ui, sans-serif; cursor:pointer;
+      transition:background .1s, border-color .1s, color .1s; }
+    .rl-lm-upload .lbl { color:#dcdce0; transition:color .1s; }
+    .rl-lm-upload:hover { background:var(--rl-lm-acc,${BRAND}); border-color:var(--rl-lm-acc,${BRAND}); color:#fff; }
+    .rl-lm-upload:hover .lbl { color:#fff; }
+    .rl-lm-ibtn { width:34px; height:34px; flex:0 0 auto; display:flex; align-items:center; justify-content:center;
+      background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.14); border-radius:7px;
+      color:#c2c2c8; cursor:pointer; transition:background .1s, border-color .1s, color .1s; }
+    .rl-lm-ibtn:hover { background:var(--rl-lm-acc,${BRAND}); border-color:var(--rl-lm-acc,${BRAND}); color:#fff; }
+    .rl-lm-toolbar svg { display:block; pointer-events:none; }
+
+    /* File row [<] [ dropdown ] [>] - reuses the visual language of Load Image. */
+    .rl-lm-filerow { display:flex; gap:6px; align-items:stretch; flex:0 0 auto; }
+    .rl-lm-nav { flex:0 0 auto; width:30px; background:#1d1d1d; border:1px solid #444; border-radius:4px;
+      color:var(--rl-lm-acc,${BRAND}); font-size:11px; font-weight:700; cursor:pointer; display:flex;
+      align-items:center; justify-content:center; user-select:none; transition:border-color .08s; }
+    .rl-lm-nav:hover:not(.disabled) { border-color:var(--rl-lm-acc,${BRAND}); }
+    .rl-lm-nav.disabled { opacity:.3; cursor:default; }
+    .rl-lm-dropdown { flex:1; min-width:0; background:#1d1d1d; border:1px solid #444; border-radius:4px;
+      padding:6px 10px; color:#ccc; cursor:pointer; display:flex; justify-content:space-between; align-items:center; user-select:none; }
+    .rl-lm-dropdown:hover { border-color:var(--rl-lm-acc,${BRAND}); }
+    .rl-lm-dropdown .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .rl-lm-dropdown .counter { color:#777; font-size:9px; margin-left:6px; flex-shrink:0;
+      font-family: ui-monospace, monospace; }
+    .rl-lm-dropdown .arrow { color:var(--rl-lm-acc,${BRAND}); font-size:13px; margin-left:6px; line-height:1; }
+
+    /* Nodes 2.0 preview canvas (fills the remaining node height). */
+    .rl-lm-preview-canvas { display:block; width:100%; box-sizing:border-box; flex:1 1 0;
+      min-height:${LM_PREVIEW_FILL_MIN}px; border-radius:4px; }
+  `;
+  document.head.appendChild(s);
+}
+
+// Nodes 2.0: hide ComfyUI's native input image-preview + collapse the native
+// flex:1 preview CONTAINER for this node - we draw our own preview canvas
+// instead. Scoped to .rl-lm-root so it is a no-op elsewhere and in legacy.
+function injectNodes2CSS() {
+  if (document.getElementById("rl-lm-nodes2-css")) return;
+  const s = document.createElement("style");
+  s.id = "rl-lm-nodes2-css";
+  s.textContent =
+    ".lg-node:has(.rl-lm-root) .image-preview{display:none !important;}" +
+    ".lg-node:has(.rl-lm-root) .lg-node-widgets + div.flex-1{display:none !important;}" +
+    // The body rises over the output-slot band (nudge), so the widget root's
+    // opaque panel background would cover the "image" / "image_info" labels. The
+    // Vue node already has its own body background, so drop ours here. SCOPE to
+    // .lg-node (like the two rules above) so it self-disables in Classic - a
+    // LIVE renderer toggle (Nodes 2.0 -> Classic, no reload) leaves this
+    // stylesheet in <head>, and a bare .rl-lm-root would then blank the Classic
+    // panel bg. Classic has no .lg-node, so the scoped rule is inert there.
+    ".lg-node:has(.rl-lm-root) .rl-lm-root{background:transparent !important;}";
+  document.head.appendChild(s);
+}
+
+function ibtn(kind, title) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "rl-lm-ibtn";
+  b.title = title;
+  b.innerHTML = ICONS[kind];
+  return b;
+}
+
+// Build the DOM face (one widget). renderUI is deliberately NOT needed - the
+// only dynamic part is the cards, rebuilt in-place by updateCards.
+function buildRoot() {
+  const root = document.createElement("div");
+  root.className = "rl-lm-root";
+  const inner = document.createElement("div");
+  inner.className = "rl-lm-inner";
+  root.appendChild(inner);
+
+  // Cards canvas. In Classic the cards are painted in the slot dead-space
+  // instead (display:none here so they take no body height); in Nodes 2.0 this
+  // canvas carries them as a row.
+  const cards = document.createElement("canvas");
+  cards.className = "rl-lm-cards";
+  cards.style.display = isVueNodes() ? "block" : "none";
+  inner.appendChild(cards);
+
+  // Toolbar.
+  const bar = document.createElement("div");
+  bar.className = "rl-lm-toolbar";
+  const up = document.createElement("button");
+  up.type = "button";
+  up.className = "rl-lm-upload";
+  up.dataset.role = "upload";
+  up.innerHTML = ICONS.upload + '<span class="lbl">Upload</span>';
+  const paste = ibtn("paste", "Paste from clipboard (Ctrl+V)");
+  paste.dataset.role = "paste";
+  const gear = ibtn("gear", "Resize & settings");
+  gear.dataset.role = "gear";
+  bar.append(up, paste, gear);
+  inner.appendChild(bar);
+
+  // File row.
+  const fileRow = document.createElement("div");
+  fileRow.className = "rl-lm-filerow";
+  const prev = document.createElement("button");
+  prev.type = "button"; prev.className = "rl-lm-nav"; prev.dataset.role = "prev";
+  prev.title = "Previous image (PageUp)"; prev.textContent = "◀";
+  const dd = document.createElement("div");
+  dd.className = "rl-lm-dropdown"; dd.dataset.role = "dropdown";
+  dd.innerHTML = '<span class="name">— no image —</span><span class="counter" data-role="counter"></span><span class="arrow">▼</span>';
+  const next = document.createElement("button");
+  next.type = "button"; next.className = "rl-lm-nav"; next.dataset.role = "next";
+  next.title = "Next image (PageDown)"; next.textContent = "▶";
+  fileRow.append(prev, dd, next);
+  inner.appendChild(fileRow);
+
+  return { root, inner, cards };
+}
+
+function applyAccent(node) {
+  const inner = node._redLmInner;
+  if (inner) inner.style.setProperty("--rl-lm-acc", accentOf(node));
+}
+
+// The current preview/source image (loaded pick, or a fetched /view on restore).
+function currentImage(node) {
+  const a = node.imgs?.[0];
+  if (a?.complete && a.naturalWidth) return a;
+  const b = node._redLmPreviewImgEl;
+  return (b?.complete && b.naturalWidth) ? b : null;
+}
+
+// ── INPUT -> OUTPUT cards (painted, Outpaint style) ──────────────────────────
+function cardsInfo(node) {
+  const img = currentImage(node);
+  if (!img) return { mode: "msg", text: "Upload or pick an image" };
+  const inW = img.naturalWidth, inH = img.naturalHeight;
+  const { w: outW, h: outH } = previewResize(inW, inH, readState(node));
+  return { mode: "dual", inW, inH, outW, outH, changed: inW !== outW || inH !== outH };
+}
+
+function roundRectP(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  if (typeof ctx.roundRect === "function") { ctx.roundRect(x, y, w, h, r); return; }
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+// Paint the cards into ctx within [leftPad .. leftPad+pairW], centred on midY.
+// CSS-pixel space, so it is renderer-agnostic: the same function paints the
+// Classic dead-space AND the Nodes 2.0 canvas (the Outpaint pattern).
+function paintCardsInto(ctx, node, leftPad, midY, pairW) {
+  const info = cardsInfo(node);
+  const acc = accentOf(node);
+  const fam = "ui-sans-serif, system-ui, sans-serif";
+  ctx.save();
+  ctx.textBaseline = "middle";
+  if (info.mode === "msg") {
+    ctx.font = "11px " + fam;
+    ctx.textAlign = "left";
+    ctx.fillStyle = acc;
+    ctx.fillText(info.text, leftPad, midY, pairW);
+    ctx.restore();
+    return;
+  }
+  const GAP = 16; // room for the chevron between the two cards
+  const cardW = (pairW - GAP) / 2;
+  const y = midY - CARDS_H / 2;
+  const card = (x, label, w, h, accent) => {
+    roundRectP(ctx, x + 0.5, y + 0.5, cardW - 1, CARDS_H - 1, 5);
+    ctx.fillStyle = "#1d1d1d"; ctx.fill();
+    ctx.strokeStyle = accent ? acc : "#444"; ctx.lineWidth = 1; ctx.stroke();
+    const cx = x + cardW / 2;
+    ctx.textAlign = "center";
+    ctx.font = "8.5px " + fam; ctx.fillStyle = "#8a8a8a";
+    ctx.fillText(label, cx, y + 11, cardW - 8);
+    ctx.font = "bold 11px " + fam; ctx.fillStyle = accent ? acc : "#cfcfcf";
+    ctx.fillText(w + " × " + h, cx, y + 25, cardW - 8);
+  };
+  card(leftPad, "INPUT", info.inW, info.inH, false);
+  card(leftPad + cardW + GAP, "OUTPUT", info.outW, info.outH, info.changed);
+  const ax = leftPad + cardW + GAP / 2;
+  ctx.strokeStyle = info.changed ? acc : "#8a8a8a"; ctx.lineWidth = 1.5;
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(ax - 2.5, midY - 4); ctx.lineTo(ax + 2.5, midY); ctx.lineTo(ax - 2.5, midY + 4);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Nodes 2.0: paint the cards canvas row. Classic hides that canvas and paints in
+// the slot dead-space via onDrawForeground instead.
+function renderCardsCanvas(node) {
+  const cv = node._redLmCards;
+  if (!cv || cv.style.display === "none") return;
+  const cssW = cv.clientWidth, cssH = cv.clientHeight;
+  if (cssW <= 0 || cssH <= 0) return;
+  const ctx = sizeCanvas(cv, cssW, cssH);
+  // The canvas overlaps the output-slot band (nudge below), so reserve the right
+  // for the "image" / "image_info" labels. Too narrow -> paint NOTHING (the
+  // canvas is already cleared + transparent, so the labels show through) rather
+  // than flooring the width and painting opaque cards OVER the labels. Mirrors
+  // the Classic dead-space paint's pairW>=120 blank-gate.
+  const pairW = cssW - CARDS_VUE_RIGHT_RESERVE - 4;
+  if (pairW < 120) return;
+  paintCardsInto(ctx, node, 4, cssH / 2, pairW);
+}
+
+// ── Nodes 2.0 nudge: lift the body beside the output dots ────────────────────
+// Adapted from the Sliders output-dot recipe: the
+// Vue frontend has no native way to move an output or paint the slot dead-space,
+// so we pull the output-slot BLOCK out of the flow. The widget body (cards first)
+// then rises up to overlap the slot band, putting the cards in the LEFT
+// dead-space beside the dots - matching the Classic layout. Cosmetic + wrapped in
+// try/catch: if a future frontend defeats it, the cards fall back to a row below
+// the dots and the node still works.
+function miniSlotBlock(el) {
+  const out = el.querySelector(".lg-slot--output");
+  return out?.parentElement?.parentElement || null;
+}
+function isNudged(el) {
+  // Already pulled out of flow? A negative inline margin is our own mark. Vue
+  // REPLACES the element on re-render (fresh element, no inline style), so this
+  // correctly reads false again after a re-render and the poll re-applies it.
+  const block = miniSlotBlock(el);
+  if (!block) return false;
+  return parseFloat(block.style.marginBottom || "0") < 0;
+}
+// The widget wrapper adds a little top padding, so a bare -blockHeight leaves the
+// cards sitting a touch low. This extra lift centres the 44px cards canvas on the
+// 2-row slot band. Tuned against the live node (was ~10 layout px low).
+const NUDGE_EXTRA_LIFT = 8;
+function nudgeCardsIntoSlots(node) {
+  if (!isVueNodes()) return;
+  try {
+    const el = document.querySelector(`.lg-node[data-node-id="${node.id}"]`);
+    if (!el) return;
+    if (isNudged(el)) return; // steady state: one property read, no reflow
+    const block = miniSlotBlock(el);
+    const col = el.querySelector(".lg-slot--output")?.parentElement;
+    if (!block || !col) return;
+    // Reset first so the measure is against the natural layout, then pull the
+    // block out of flow so everything after it rises by (its height + a little).
+    block.style.marginBottom = "0px";
+    const h = block.offsetHeight;
+    if (h <= 0) return;
+    block.style.marginBottom = (-(h + NUDGE_EXTRA_LIFT)) + "px";
+    // The dots must stay draggable; the cards canvas over them is pointer-events:none.
+    block.style.pointerEvents = "none";
+    col.style.pointerEvents = "auto";
+    renderCardsCanvas(node);
+  } catch { /* nudge failed - cards stay a row below the dots, node still works */ }
+}
+// Vue REPLACES the node element on re-render (orphaning any observer) and can add
+// slots a frame late, so a self-heal poll is required (Sliders lesson). isNudged
+// makes the steady state a single rect read.
+function watchCardsNudge(node) {
+  if (!isVueNodes() || node._redLmNudgePoll) return;
+  const tick = () => {
+    if (!node.graph) { clearInterval(node._redLmNudgePoll); node._redLmNudgePoll = null; return; }
+    nudgeCardsIntoSlots(node);
+  };
+  node._redLmNudgePoll = setInterval(tick, 350);
+  nudgeCardsIntoSlots(node);
+  requestAnimationFrame(() => { nudgeCardsIntoSlots(node); setTimeout(() => nudgeCardsIntoSlots(node), 120); });
+}
+function unwatchCardsNudge(node) {
+  if (node._redLmNudgePoll) clearInterval(node._redLmNudgePoll);
+  node._redLmNudgePoll = null;
+}
+
+// Refresh the cards on whichever surface applies.
+function renderCards(node) {
+  if (isVueNodes()) { renderCardsCanvas(node); nudgeCardsIntoSlots(node); }
+  node.setDirtyCanvas?.(true, true); // Classic repaints via onDrawForeground
+}
+
+function refreshFace(node) {
+  applyAccent(node);
+  renderCards(node);
+  if (isVueNodes()) renderPreviewCanvas(node);
+  node.setDirtyCanvas?.(true, true);
+}
+
+// ── dropdown label + arrows (mirrors Load Image) ─────────────────────────────
+function refreshDropdown(node) {
+  const root = node._redLmRoot;
+  if (!root) return;
+  const w = node._redLiImageWidget;
+  const ddName = root.querySelector('[data-role="dropdown"] .name');
+  const counter = root.querySelector('[data-role="counter"]');
+  const value = w?.value || "";
+  if (ddName) ddName.textContent = value ? splitFilenameSubfolder(value).filename : "— no image —";
+  const values = w?.options?.values || [];
+  if (counter) {
+    if (value && values.length > 1) {
+      const idx = values.indexOf(value);
+      counter.textContent = idx >= 0 ? `${idx + 1} / ${values.length}` : "";
+    } else counter.textContent = "";
+  }
+  const disabled = values.length < 2;
+  root.querySelector('[data-role="prev"]')?.classList.toggle("disabled", disabled);
+  root.querySelector('[data-role="next"]')?.classList.toggle("disabled", disabled);
+}
+
+function pickByOffset(node, offset) {
+  const w = node._redLiImageWidget;
+  if (!w) return;
+  const values = w.options?.values || [];
+  if (values.length === 0) return;
+  const cur = values.indexOf(w.value);
+  let next;
+  if (cur < 0) next = offset > 0 ? 0 : values.length - 1;
+  else next = ((cur + offset) % values.length + values.length) % values.length;
+  setSelectedImage(node, values[next]);
+}
+
+// ── Nodes 2.0 preview canvas ─────────────────────────────────────────────────
+function sizeCanvas(cv, cssW, cssH) {
+  const s = canvasBackingScale(cssW, cssH);
+  const bw = Math.round(cssW * s), bh = Math.round(cssH * s);
+  if (cv.width !== bw) cv.width = bw;
+  if (cv.height !== bh) cv.height = bh;
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(s, 0, 0, s, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+  return ctx;
+}
+
+function renderPreviewCanvas(node) {
+  const cv = node._redLmImageCanvas;
+  if (!cv || cv.clientWidth <= 0 || cv.clientHeight <= 0) return;
+  const cssW = cv.clientWidth, cssH = cv.clientHeight;
+  const DIMS_H = 18;
+  const areaH = Math.max(20, cssH - DIMS_H);
+  const ctx = sizeCanvas(cv, cssW, cssH);
+  const im = currentImage(node);
+  if (im) {
+    const scale = Math.min((cssW - 12) / im.naturalWidth, areaH / im.naturalHeight, 1);
+    const w = Math.round(im.naturalWidth * scale), h = Math.round(im.naturalHeight * scale);
+    ctx.drawImage(im, Math.round((cssW - w) / 2), Math.round((areaH - h) / 2), w, h);
+    ctx.fillStyle = "#9a9a9a";
+    ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(`${im.naturalWidth} × ${im.naturalHeight}`, cssW / 2, cssH - DIMS_H / 2);
+  } else {
+    ctx.fillStyle = "#151515";
+    ctx.fillRect(0, 0, cssW, cssH);
+    ctx.strokeStyle = "#3a3a3a"; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+    ctx.strokeRect(4.5, 4.5, cssW - 9, cssH - 9); ctx.setLineDash([]);
+  }
+}
+
+// Ensure an image is loaded for the preview (fetch /view on restore), then draw.
+function updatePreview(node) {
+  if (!isVueNodes()) return;
+  const im = node.imgs?.[0];
+  if (!(im?.complete && im.naturalWidth)) {
+    const fn = node._redLiImageWidget?.value;
+    if (fn) {
+      const { subfolder, filename } = splitFilenameSubfolder(fn);
+      const src = `/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}&t=${Date.now()}`;
+      let elImg = node._redLmPreviewImgEl;
+      if (!elImg) { elImg = new Image(); node._redLmPreviewImgEl = elImg; }
+      elImg.onload = () => { renderCards(node); renderPreviewCanvas(node); node.setDirtyCanvas?.(true, true); };
+      if (elImg.src !== src) elImg.src = src;
+    }
+  }
+  renderPreviewCanvas(node);
+  node.setDirtyCanvas?.(true, true);
+}
+
+function createPreviewCanvas(node) {
+  const inner = node._redLmInner;
+  if (!inner) return;
+  const cv = document.createElement("canvas");
+  cv.className = "rl-lm-preview-canvas";
+  inner.appendChild(cv);
+  node._redLmImageCanvas = cv;
+
+  // Both canvases are full-width, so a node resize changes both - repaint the
+  // cards row alongside the preview.
+  const repaint = () => { renderCardsCanvas(node); renderPreviewCanvas(node); };
+  const ro = new ResizeObserver(repaint);
+  ro.observe(cv);
+  node._redLmPreviewRO = ro;
+
+  node._redLmZoomOff = installZoomRepaint(
+    node,
+    () => [cv.clientWidth || 0, cv.clientHeight || 0],
+    repaint,
+    "_redLmZoomRaf",
+  );
+  requestAnimationFrame(() => { updatePreview(node); renderCardsCanvas(node); });
+}
+
+// ── no inputs (Load Image Pattern #17) ───────────────────────────────────────
+function stripInputs(node) {
+  if (!node?.inputs || node.inputs.length === 0) return false;
+  for (let i = node.inputs.length - 1; i >= 0; i--) {
+    if (node.inputs[i]?.link != null) { try { node.disconnectInput(i); } catch (_e) { /* ignore */ } }
+    node.removeInput(i);
+  }
+  node.setDirtyCanvas?.(true, true);
+  return true;
+}
+
+// Hide the auto-created image/upload widgets. Own copy (not Load Image's) so the
+// late re-hide pass skips THIS node's DOM widget by name.
+function hideNativeCombo(node) {
+  let imageWidget = null;
+  for (const w of (node.widgets || [])) {
+    if (!w) continue;
+    if (w.name === "image") imageWidget = w;
+    w.hidden = true;
+    w.computeSize = () => [0, -4];
+    if (!w.options) w.options = {};
+    w.options.canvasOnly = true;
+    if (w.element) w.element.style.display = "none";
+  }
+  requestAnimationFrame(() => {
+    for (const w of (node.widgets || [])) {
+      if (!w || w.name === MINI_WIDGET) continue;
+      const el = w.element || w.inputEl;
+      if (el) el.style.display = "none";
+    }
+  });
+  return imageWidget;
+}
+
+function setupNode(node) {
+  injectCSS();
+  // The file dropdown (openImageDropdown) builds .rl-li-* elements but doesn't
+  // self-inject its CSS - inject it now so the popup is styled even when the gear
+  // panel was never opened and no full Load Image node exists (idempotent).
+  injectLiCSS();
+  hideJsonWidget(node.widgets, HIDDEN_INPUT);
+
+  const imageWidget = hideNativeCombo(node);
+  node._redLiImageWidget = imageWidget;   // api.mjs field name (shared backend)
+  stripInputs(node);
+
+  const { root, inner, cards } = buildRoot();
+  node._redLmRoot = root;
+  node._redLmInner = inner;
+  node._redLmCards = cards;
+  applyAccent(node);
+
+  // Content-height measure (Load Image pattern): sum inner.children, counting
+  // the preview canvas at its MIN (never its grown height). Cache the last good
+  // measure so a hidden node (folded group) doesn't inflate.
+  const _lastGoodH = {};
+  function measureH(previewMin) {
+    let totalH = 0, visible = 0;
+    for (const child of inner.children) {
+      const st = window.getComputedStyle(child);
+      if (st.position === "absolute" || st.position === "fixed") continue;
+      if (st.display === "none") continue;
+      if (child === node._redLmImageCanvas) { totalH += previewMin; visible += 1; continue; }
+      totalH += child.offsetHeight;
+      visible += 1;
+    }
+    const padding = 14;                    // 6 top + 8 bottom
+    const gaps = Math.max(0, visible - 1) * 7;
+    if (totalH < 20) return _lastGoodH[previewMin] || 200;
+    // Coarse-round to a 4px grid so sub-pixel font metrics can't creep node.size
+    // taller on every workflow open (grow-to-content is grow-only; Vue Compat #18).
+    const result = Math.round((totalH + padding + gaps) / 4) * 4;
+    _lastGoodH[previewMin] = result;
+    return result;
+  }
+  const measureContentHeight = () => measureH(LM_PREVIEW_FILL_MIN);
+  const measureFloorHeight = () => measureH(LM_PREVIEW_FLOOR_MIN);
+  node._redLmMeasureHeight = measureContentHeight;
+
+  installCanvasZoomPassthrough(root);
+  const widget = node.addDOMWidget(MINI_WIDGET, "custom", root, {
+    getValue: () => null,
+    setValue: () => {},
+    getMinHeight: measureContentHeight,
+    getMaxHeight: measureContentHeight,
+    margin: 0,
+    serialize: false,
+  });
+  applyAdaptiveCanvasOnly(widget);
+  node._redLmWidget = widget;
+
+  node._redLmFloorOff = installResizeFloor(root, measureFloorHeight);
+
+  if (isVueNodes()) {
+    widget.computeLayoutSize = () => ({ minHeight: measureContentHeight(), minWidth: 1 });
+    createPreviewCanvas(node);
+    injectNodes2CSS();
+    watchCardsNudge(node); // lift the cards beside the output dots (Sliders nudge)
+  }
+
+  // Fresh-node default size. SYNCHRONOUS so configure() overrides for saved
+  // workflows (Vue Compat #8 / node UI convention #9).
+  if (!node.size || node.size[0] < DEFAULT_W) node.size[0] = DEFAULT_W;
+  if (!node.size[1] || node.size[1] < DEFAULT_H) node.size[1] = DEFAULT_H;
+
+  // Ctrl+V routing.
+  node._redLmOnSelected = () => { _activeMiniNode = node; };
+  node._redLmOnDeselected = () => { if (_activeMiniNode === node) _activeMiniNode = null; };
+
+  // api.mjs hooks: fired when a freshly-picked image's natural dims arrive, and
+  // when a filename changes.
+  node._redLiOnImageLoaded = () => onImageReady();
+  node._redLiOnFilenameChanged = () => refreshDropdown(node);
+
+  function onImageReady() {
+    renderCards(node);
+    updatePreview(node);
+    node.setDirtyCanvas?.(true, true);
+  }
+  function refreshAfterImageReady() {
+    if (node._redLmImgPoll) { clearInterval(node._redLmImgPoll); node._redLmImgPoll = null; }
+    if (node.imgs?.[0]?.naturalWidth) { onImageReady(); return; }
+    let ticks = 0;
+    const poll = setInterval(() => {
+      if (node.imgs?.[0]?.naturalWidth) { clearInterval(poll); node._redLmImgPoll = null; onImageReady(); }
+      else if (++ticks > 30) { clearInterval(poll); node._redLmImgPoll = null; }
+    }, 100);
+    node._redLmImgPoll = poll;
+  }
+  refreshAfterImageReady();
+
+  // Wrap the image widget callback (native drag-drop path) + track the original
+  // (non-clipspace) name for the Filename output (issue #51 parity).
+  if (imageWidget) {
+    const origCallback = imageWidget.callback;
+    imageWidget.callback = function () {
+      const ret = origCallback?.apply(this, arguments);
+      if (imageWidget.value) {
+        node._redLiSelectedFilename = imageWidget.value;
+        if (!/clipspace/i.test(imageWidget.value)) node._redLiOrigName = imageWidget.value;
+      }
+      refreshAfterImageReady();
+      refreshDropdown(node);
+      return ret;
+    };
+    if (imageWidget.value) {
+      node._redLiSelectedFilename = imageWidget.value;
+      if (!/clipspace/i.test(imageWidget.value)) node._redLiOrigName = imageWidget.value;
+    }
+    // Catch EXTERNAL writes (Mask Editor, Copy/Paste Clipspace) that bypass the
+    // callback - keeps the defensive cache in lockstep so graphToPrompt never
+    // reverts to a stale file (issue #50 parity).
+    try {
+      const desc = Object.getOwnPropertyDescriptor(imageWidget, "value");
+      if (!desc || desc.configurable) {
+        const origGet = desc && desc.get, origSet = desc && desc.set;
+        let stored = imageWidget.value;
+        Object.defineProperty(imageWidget, "value", {
+          configurable: true,
+          enumerable: desc ? desc.enumerable !== false : true,
+          get() { return origGet ? origGet.call(this) : stored; },
+          set(v) {
+            if (origSet) origSet.call(this, v); else stored = v;
+            if (v && !isGraphLoading()) {
+              node._redLiSelectedFilename = v;
+              if (!/clipspace/i.test(v)) node._redLiOrigName = v;
+            }
+          },
+        });
+      }
+    } catch (e) { console.warn("[Load Image (Reaper)] could not intercept image value", e); }
+  }
+
+  // Toolbar: upload / paste / gear.
+  root.querySelector('[data-role="upload"]')?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try { const saved = await pickAndUploadFile(node); if (saved) refreshDropdown(node); }
+    catch (err) { console.error("[Load Image (Reaper)] upload failed", err); alert("Upload failed: " + err.message); }
+  });
+  root.querySelector('[data-role="paste"]')?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try { const saved = await pasteFromClipboard(node); if (saved) refreshDropdown(node); }
+    catch (err) { console.error("[Load Image (Reaper)] paste failed", err); alert("Paste failed: " + err.message); }
+  });
+  root.querySelector('[data-role="gear"]')?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openMiniSettings(node, { onChange: () => refreshFace(node) });
+  });
+
+  // Drop fallback on the widget root.
+  root.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault(); e.stopPropagation();
+  });
+  root.addEventListener("drop", async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const file = e.dataTransfer?.files?.[0];
+    if (!file || !file.type.startsWith("image/")) return;
+    try { await uploadImageToInput(node, file); refreshDropdown(node); }
+    catch (err) { console.error("[Load Image (Reaper)] drop failed", err); alert("Upload failed: " + err.message); }
+  });
+
+  // Dropdown + arrows.
+  const dd = root.querySelector('[data-role="dropdown"]');
+  dd?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openImageDropdown(node, dd, () => refreshDropdown(node));
+  });
+  const prevBtn = root.querySelector('[data-role="prev"]');
+  const nextBtn = root.querySelector('[data-role="next"]');
+  prevBtn?.addEventListener("click", (e) => { e.stopPropagation(); if (!prevBtn.classList.contains("disabled")) pickByOffset(node, -1); });
+  nextBtn?.addEventListener("click", (e) => { e.stopPropagation(); if (!nextBtn.classList.contains("disabled")) pickByOffset(node, +1); });
+
+  // Initial paint - deferred past configure() so a restored workflow shows its
+  // saved state, not the defaults.
+  queueMicrotask(() => {
+    refreshDropdown(node);
+    renderCards(node);
+    applyAccent(node);
+    if (isVueNodes() && node._redLiImageWidget?.value && !node.imgs?.[0]?.naturalWidth) {
+      updateNativePreview(node, node._redLiImageWidget.value);
+    }
+    // Nodes 2.0 fresh node: grow to fit the clipped content once (never on the
+    // load path - Vue Compat #18).
+    if (isVueNodes()) {
+      const settle = (tries) => requestAnimationFrame(() => {
+        if (isGraphLoading() || !inner || typeof node.setSize !== "function") return;
+        const clipped = inner.scrollHeight - inner.clientHeight;
+        if (clipped > 1 && tries > 0) { node.setSize([node.size[0], (node.size[1] || 0) + clipped + 2]); settle(tries - 1); }
+      });
+      settle(6);
+    }
+  });
+}
+
+app.registerExtension({
+  name: "Reaper.LoadImage",
+
+  // No Settings-panel row: this node's color lives in its OWN gear panel. It
+  // used to be registered here with defaultValue BRAND, which made
+  // getSettingValue ALWAYS return the orange - so the node-type default
+  // permanently outranked the master accent and "Every Reaper node" could
+  // never reach this node. Unregistered, the key is written ONLY by an explicit
+  // "New Load Image (Reaper) nodes" press, so stored == deliberately chosen.
+
+  beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData.name !== CLASS) return;
+    if (nodeType.prototype._redLmPatched) return;
+    nodeType.prototype._redLmPatched = true;
+
+    nodeType.prototype.onConnectInput = function () { return false; };
+
+    const _origConn = nodeType.prototype.onConnectionsChange;
+    const INPUT_T = (typeof LiteGraph !== "undefined" && LiteGraph.INPUT != null) ? LiteGraph.INPUT : 1;
+    nodeType.prototype.onConnectionsChange = function (type) {
+      const r = _origConn?.apply(this, arguments);
+      if (type === INPUT_T && !isGraphLoading()) stripInputs(this);
+      return r;
+    };
+
+    const _origResize = nodeType.prototype.onResize;
+    nodeType.prototype.onResize = function (size) {
+      if (!isVueNodes() && this.size[0] < MIN_W) this.size[0] = MIN_W;
+      return _origResize?.apply(this, arguments);
+    };
+
+    // Classic: paint the INPUT->OUTPUT cards in the LEFT slot dead-space (like
+    // Outpaint) + a min-width self-heal (Vue Compat #18: setDirtyCanvas is a
+    // redraw flag, not a dirty-tracker trip). Nodes 2.0 skips body painting and
+    // carries the cards on the DOM canvas instead.
+    const _origDraw = nodeType.prototype.onDrawForeground;
+    nodeType.prototype.onDrawForeground = function (ctx) {
+      const r = _origDraw?.apply(this, arguments);
+      if (isVueNodes() || this.flags?.collapsed) return r;
+      // isGraphLoading gate: node.size is serialized and this is the one clamp
+      // that runs on the first frame of a LOAD (convention #7). Without it, a node
+      // saved narrower in Nodes 2.0 is rewritten on open and the untouched
+      // workflow asks to be saved.
+      if (!isGraphLoading() && this.size[0] < MIN_W) { this.size[0] = MIN_W; this.setDirtyCanvas(true, true); }
+      const pairW = this.size[0] - CARDS_LEFT - CARDS_RIGHT_RESERVE;
+      // Too narrow to say anything useful - better blank than clipped smears.
+      if (pairW >= 120) paintCardsInto(ctx, this, CARDS_LEFT, CARDS_MID_Y, pairW);
+      return r;
+    };
+
+    const _origSel = nodeType.prototype.onSelected;
+    const _origDes = nodeType.prototype.onDeselected;
+    nodeType.prototype.onSelected = function () { this._redLmOnSelected?.(); return _origSel?.apply(this, arguments); };
+    nodeType.prototype.onDeselected = function () { this._redLmOnDeselected?.(); return _origDes?.apply(this, arguments); };
+
+    const _origConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function () {
+      const r = _origConfigure?.apply(this, arguments);
+      stripInputs(this);
+      queueMicrotask(() => {
+        refreshDropdown(this);
+        const w = this._redLiImageWidget;
+        if (w?.value) {
+          this._redLiSelectedFilename = w.value;
+          if (!/clipspace/i.test(w.value)) this._redLiOrigName = w.value;
+        }
+        renderCards(this);
+        applyAccent(this);
+      });
+      setTimeout(() => { renderCards(this); if (isVueNodes()) updatePreview(this); }, 600);
+      return r;
+    };
+
+    const _origRemoved = nodeType.prototype.onRemoved;
+    nodeType.prototype.onRemoved = function () {
+      document.querySelector(".rl-li-popup")?._redClose?.();
+      document.querySelector(".rl-li-rs-popup")?.remove(); // resample popup opened from the gear
+      closeMiniSettingsFor(this);
+      // Detach any in-flight /view preview fetch so its onload can't fire on a
+      // torn-down node (harmless no-op, but tidy).
+      if (this._redLmPreviewImgEl) this._redLmPreviewImgEl.onload = null;
+      if (this._redLmImgPoll) clearInterval(this._redLmImgPoll);
+      this._redLmImgPoll = null;
+      try { this._redLmPreviewRO?.disconnect(); } catch {}
+      this._redLmPreviewRO = null;
+      try { this._redLmZoomOff?.(); } catch {}
+      this._redLmZoomOff = null;
+      try { cancelAnimationFrame(this._redLmZoomRaf); } catch {}
+      this._redLmZoomRaf = null;
+      try { this._redLmFloorOff?.(); } catch {}
+      this._redLmFloorOff = null;
+      unwatchCardsNudge(this);
+      if (_activeMiniNode === this) _activeMiniNode = null;
+      return _origRemoved?.apply(this, arguments);
+    };
+  },
+
+  getNodeMenuItems(node) {
+    if (node?.comfyClass !== CLASS) return [];
+    return [null, { content: "⚙ Resize & settings", callback: () => openMiniSettings(node, { onChange: () => refreshFace(node) }) }];
+  },
+
+  nodeCreated(node) {
+    if (node.comfyClass !== CLASS) return;
+    setupNode(node);
+  },
+});
+
+// Global Ctrl+V + PageUp/PageDown for the active mini node.
+window.addEventListener("keydown", async (e) => {
+  if (!_activeMiniNode) return;
+  if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "v") return;
+  const tag = (e.target?.tagName || "").toUpperCase();
+  if (tag === "INPUT" || tag === "TEXTAREA" || e.target?.isContentEditable) return;
+  e.preventDefault(); e.stopPropagation();
+  try { const saved = await pasteFromClipboard(_activeMiniNode); if (saved) refreshDropdown(_activeMiniNode); }
+  catch (err) { console.error("[Load Image (Reaper)] paste failed", err); }
+}, true);
+window.addEventListener("keydown", (e) => {
+  if (!_activeMiniNode) return;
+  if (e.key !== "PageUp" && e.key !== "PageDown") return;
+  const tag = (e.target?.tagName || "").toUpperCase();
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.target?.isContentEditable) return;
+  e.preventDefault(); e.stopPropagation();
+  pickByOffset(_activeMiniNode, e.key === "PageUp" ? -1 : +1);
+}, true);
+
+// ── graphToPrompt: inject state + orig_name + clipspace-safe filename sync ───
+function buildIndex() {
+  const index = new Map();
+  const visit = (graph, prefix) => {
+    if (!graph) return;
+    for (const n of graph._nodes || graph.nodes || []) {
+      if (!n) continue;
+      // Composite id (prefix "" at top level, "instance:" inside a subgraph) so a
+      // subgraph node exact-matches its "5:3"-style prompt id and can't collide
+      // with a top-level node that happens to share the bare id.
+      const cid = String(prefix) + n.id;
+      if (n.comfyClass === CLASS || n.type === CLASS) {
+        index.set(cid, n);
+        // Bare id, FIRST-write-wins (top level is visited first), so a subgraph
+        // node never clobbers a top-level node's exact-id resolution; also keeps
+        // the tail-match fallback working if the id scheme ever differs.
+        if (!index.has(String(n.id))) index.set(String(n.id), n);
+      }
+      const inner = n.subgraph || n.graph || n._graph;
+      if (inner && inner !== graph) visit(inner, cid + ":");
+    }
+  };
+  visit(app.graph, "");
+  return index;
+}
+function findNode(index, id) {
+  const s = String(id);
+  if (index.has(s)) return index.get(s);
+  const tail = s.includes(":") ? s.slice(s.lastIndexOf(":") + 1) : null;
+  return tail && index.has(tail) ? index.get(tail) : null;
+}
+
+if (!app._reaperLoadImagePromptPatched) {
+  app._reaperLoadImagePromptPatched = true;
+  const _orig = app.graphToPrompt.bind(app);
+  app.graphToPrompt = async function (...args) {
+    const result = await _orig(...args);
+    try {
+      const out = result?.output;
+      if (out) {
+        let index = null;
+        for (const id in out) {
+          const entry = out[id];
+          if (!entry || entry.class_type !== CLASS) continue;
+          if (!index) index = buildIndex();
+          const node = findNode(index, id);
+          const stateStr = node?.properties?.[STATE_PROP] || JSON.stringify(DEFAULT_STATE);
+          entry.inputs = entry.inputs || {};
+          // Strip the frontend-only accent before injecting: it is a pure UI
+          // color, but it lives inside the state object and IS_CHANGED hashes the
+          // injected string - so leaving it in makes a cosmetic color pick
+          // invalidate the cache and re-run the loader + everything downstream.
+          let obj; try { obj = JSON.parse(stateStr); } catch { obj = { ...DEFAULT_STATE }; }
+          delete obj.accent;
+          if (node?._redLiOrigName) obj.orig_name = node._redLiOrigName;
+          entry.inputs[HIDDEN_INPUT] = JSON.stringify(obj);
+          const w = node?._redLiImageWidget;
+          const live = entry.inputs.image;
+          if (typeof live === "string" && /clipspace/i.test(live)) {
+            if (node) node._redLiSelectedFilename = live;
+          } else {
+            const cached = node?._redLiSelectedFilename;
+            if (cached && w && live !== cached) { w.value = cached; entry.inputs.image = cached; }
+          }
+        }
+      }
+    } catch (e) { console.warn("[Load Image (Reaper)] could not inject state:", (e && e.message) || e); }
+    return result;
+  };
+}
+
+// The gear in the node selection toolbar opens the same panel the right-click
+// entry does. ownMenuItem: this node already adds its own menu line.
+registerNodeSettings(CLASS, {
+  title: "Load Image (Reaper)",
+  // paints from its OWN --acc var - run its own render (see Control Panel)
+  onChange: (node) => refreshFace(node),
+  ownMenuItem: true,
+  open: (node) => openMiniSettings(node, { onChange: () => refreshFace(node) }),
+});

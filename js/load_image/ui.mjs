@@ -1,0 +1,1259 @@
+import { app } from "/scripts/app.js";
+import { BRAND } from "./index.mjs";
+
+let _cssInjected = false;
+
+export function injectCSS() {
+  if (_cssInjected) return;
+  _cssInjected = true;
+  const css = `
+    .rl-li-root {
+      width: 100%;
+      box-sizing: border-box;
+      position: relative;
+      background: #2a2a2a;
+      border-radius: 4px;
+      color: #ddd;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      font-size: 11px;
+    }
+    /* The flex column lives on an inner layer that fills the root (absolute
+       inset:0). ComfyUI forces the widget ROOT to display:block on rebuild /
+       collapse, which would kill a flex column ON the root (the 7px gaps
+       collapse and the flex:1 image canvas drops to its min height, then
+       visibly grows back when flex is restored - the flicker). The inner is
+       never touched by ComfyUI, so the layout is ALWAYS flex: no transition,
+       no flicker. Padding lives here so the absolute inner respects it. */
+    .rl-li-inner {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      /* Small top padding pulls the Upload button up tight under the output
+         dots (the body can't sit higher than the slot area). */
+      padding: 2px 8px 8px;
+      box-sizing: border-box;
+    }
+    .rl-li-upload-btn {
+      width: 100%;
+      background: var(--red-acc,${BRAND});
+      border: none;
+      border-radius: 4px;
+      padding: 7px 8px;
+      font-size: 11px;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      font-family: inherit;
+      transition: background 0.08s;
+    }
+    .rl-li-upload-btn:hover { background: #ff7e5a; }
+    .rl-li-upload-btn .ico {
+      width: 14px; height: 14px;
+      background-color: currentColor;
+      -webkit-mask: url("/reaper/assets/icons/ui/upload.svg") center/14px 14px no-repeat;
+              mask: url("/reaper/assets/icons/ui/upload.svg") center/14px 14px no-repeat;
+    }
+    .rl-li-hint {
+      font-size: 9px;
+      color: #777;
+      text-align: center;
+      letter-spacing: 0.3px;
+      margin-top: -3px;
+    }
+    .rl-li-hint kbd {
+      color: #aaa;
+      font-family: inherit;
+      background: transparent;
+      padding: 0;
+    }
+    /* File row: [◀] [ dropdown ] [▶] - arrow buttons let the user flip
+       through images visually, matching native ComfyUI LoadImage. */
+    .rl-li-filerow {
+      display: flex;
+      gap: 6px;
+      align-items: stretch;
+    }
+    .rl-li-filerow .rl-li-dropdown { flex: 1; min-width: 0; }
+    /* File nav arrows match the resample picker exactly (orange, 30px, solid). */
+    .rl-li-nav {
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      color: var(--red-acc,${BRAND});
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      width: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      transition: background 0.08s, border-color 0.08s, color 0.08s;
+      flex-shrink: 0;
+    }
+    .rl-li-nav:hover:not(.disabled) { border-color: var(--red-acc,${BRAND}); }
+    .rl-li-nav.disabled { opacity: 0.3; cursor: default; }
+    .rl-li-dropdown {
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-size: 11px;
+      color: #ccc;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      user-select: none;
+    }
+    .rl-li-dropdown:hover { border-color: var(--red-acc,${BRAND}); }
+    .rl-li-dropdown .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rl-li-dropdown .arrow { color: var(--red-acc,${BRAND}); font-size: 13px; margin-left: 6px; line-height: 1; }
+    .rl-li-dropdown .counter {
+      color: #777;
+      font-size: 9px;
+      margin-left: 6px;
+      flex-shrink: 0;
+    }
+    .rl-li-chips {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 5px;
+    }
+    .rl-li-chip {
+      box-sizing: border-box;
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 6px 3px;
+      text-align: center;
+      font-size: 9.5px;
+      color: #ccc;
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.08s, border-color 0.08s;
+    }
+    .rl-li-chip:hover { border-color: var(--red-acc,${BRAND}); color: #ddd; }
+    .rl-li-chip.active {
+      background: var(--red-acc,${BRAND});
+      color: #fff;
+      border-color: var(--red-acc,${BRAND});
+    }
+    .rl-li-panel {
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 8px 10px;
+    }
+    .rl-li-panel-row { display: flex; align-items: center; gap: 8px; }
+    .rl-li-panel-label {
+      font-size: 9px;
+      color: #FFF;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .rl-li-panel input[type="range"] {
+      flex: 1;
+      accent-color:#FFF);
+    }
+    .rl-li-panel input[type="text"], .rl-li-panel input[type="number"] {
+      background: #2a2a2a;
+      border: 1px solid #444;
+      border-radius: 3px;
+      padding: 4px 6px;
+      color: #FFF;
+      font-size: 12px;
+      font-weight: 600;
+      text-align: center;
+      font-family: inherit;
+      box-sizing: border-box;
+    }
+    .rl-li-panel input[type="text"]:focus, .rl-li-panel input[type="number"]:focus {
+      outline: none;
+      border-color: #fff;
+    }
+    .rl-li-panel-readout {
+      font-size: 9px;
+      color: #888;
+      font-family: inherit;
+      text-align: center;
+      margin-top: 6px;
+    }
+    .rl-li-quickpicks {
+      display: grid;
+      gap: 3px;
+      margin-bottom: 8px;
+    }
+    .rl-li-quickpick {
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 3px;
+      color: #aaa;
+      padding: 4px 0;
+      text-align: center;
+      font-size: 10px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .rl-li-quickpick:hover { border-color: #666; color: #ddd; }
+    .rl-li-quickpick.active {
+      background: var(--red-acc,${BRAND});
+      color: #fff;
+      border-color: var(--red-acc,${BRAND});
+    }
+    .rl-li-value {
+      font-family: inherit;
+      font-size: 12px;
+      color: var(--red-acc,${BRAND});
+      font-weight: 600;
+      min-width: 50px;
+      text-align: right;
+    }
+    .rl-li-ratio-chips {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 3px;
+      margin-bottom: 8px;
+    }
+    .rl-li-ratio-chip {
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 3px;
+      padding: 4px 0;
+      text-align: center;
+      font-size: 9px;
+      color: #aaa;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .rl-li-ratio-chip:hover { border-color: #666; color: #ddd; }
+    .rl-li-ratio-chip.active {
+      background: var(--red-acc,${BRAND});
+      color: #fff;
+      border-color: var(--red-acc,${BRAND});
+    }
+    .rl-li-cropped {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 6px;
+    }
+    .rl-li-cropped > div {
+      text-align: center;
+      font-size: 10px;
+      padding: 5px 0;
+      color: #aaa;
+      cursor: pointer;
+      user-select: none;
+    }
+    .rl-li-cropped > div.active { background: var(--red-acc,${BRAND}); color: #fff; }
+    .rl-li-pad-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      color: #888;
+    }
+    .rl-li-pad-swatch {
+      width: 22px; height: 22px;
+      border-radius: 3px;
+      border: 1px solid #444;
+      cursor: pointer;
+    }
+    .rl-li-custom-ratio-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+    /* Custom ratio inputs sit inside a .rl-li-numinput wrapper — the
+       wrapper supplies border/background; we just fix the width. */
+    .rl-li-custom-ratio-input-wrap { width: 64px; }
+    .rl-li-custom-ratio-swap {
+      width: 24px;
+      height: 22px;
+      background: #2a2a2a;
+      border: 1px solid #444;
+      border-radius: 3px;
+      color: #aaa;
+      cursor: pointer;
+      position: relative;
+      padding: 0;
+      display: inline-block;
+    }
+    .rl-li-custom-ratio-swap::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-color: currentColor;
+      -webkit-mask: url("/reaper/assets/icons/ui/swap.svg") center/14px 14px no-repeat;
+              mask: url("/reaper/assets/icons/ui/swap.svg") center/14px 14px no-repeat;
+      pointer-events: none;
+    }
+    .rl-li-custom-ratio-swap:hover { color: var(--red-acc,${BRAND}); border-color: var(--red-acc,${BRAND}); }
+    /* Center single-input panel rows (Max MP / Longest side / Scale by ×). */
+    .rl-li-panel-row.rl-li-centered { justify-content: center; }
+    .rl-li-input-wide {
+      width: 70% !important;
+      max-width: 200px;
+    }
+    /* makeNumericInput wrapper — flex row with input + stacked +/- spinners. */
+    .rl-li-numinput {
+      display: inline-flex;
+      align-items: stretch;
+      background: #2a2a2a;
+      border: 1px solid #444;
+      border-radius: 4px;
+      overflow: hidden;
+      box-sizing: border-box;
+    }
+    .rl-li-numinput:focus-within { border-color: var(--red-acc,${BRAND}); }
+    .rl-li-numinput input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      padding: 2px 6px;
+      color: var(--red-acc,${BRAND});
+      font-size: 11px;
+      font-weight: 600;
+      text-align: center;
+      font-family: inherit;
+      width: 100%;
+      min-width: 0;
+    }
+    .rl-li-spin {
+      display: flex;
+      flex-direction: column;
+      width: 12px;
+      border-left: 1px solid #444;
+    }
+    .rl-li-spin > button {
+      flex: 1;
+      background: #232323;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      color: #aaa;
+      font-size: 8px;
+      line-height: 1;
+      position: relative;
+    }
+    .rl-li-spin > button:hover { background: #333; color: var(--red-acc,${BRAND}); }
+    .rl-li-spin-up { border-bottom: 1px solid #444; }
+    /* CSS chevron arrows (no extra SVG needed). */
+    .rl-li-spin-up::before,
+    .rl-li-spin-down::before {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 6px;
+      height: 6px;
+      transform: translate(-50%, -50%) rotate(-45deg);
+      border-top: 1px solid currentColor;
+      border-right: 1px solid currentColor;
+    }
+    .rl-li-spin-up::before {
+      transform: translate(-50%, -25%) rotate(-45deg);
+    }
+    .rl-li-spin-down::before {
+      transform: translate(-50%, -75%) rotate(135deg);
+    }
+    /* Width × Height panels (Fit inside, Crop to fill) with swap between. */
+    .rl-li-wh-row {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 6px;
+      align-items: end;
+    }
+    .rl-li-wh-field {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .rl-li-wh-label {
+      font-size: 9px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      text-align: center;
+    }
+    /* W/H input is inside a .rl-li-numinput wrap — wrap provides
+       border/background. The default 11px input font is fine. */
+    .rl-li-wh-input-wrap { width: 100%; }
+    /* Generic swap button used between W and H inputs. Height matches
+       the trimmed .rl-li-numinput control height (~22 px). */
+    .rl-li-swap {
+      width: 26px;
+      height: 22px;
+      background: #2a2a2a;
+      border: 1px solid #444;
+      border-radius: 4px;
+      color: #aaa;
+      cursor: pointer;
+      padding: 0;
+      position: relative;
+      align-self: end;
+    }
+    .rl-li-swap::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-color: currentColor;
+      -webkit-mask: url("/reaper/assets/icons/ui/swap.svg") center/12px 12px no-repeat;
+              mask: url("/reaper/assets/icons/ui/swap.svg") center/12px 12px no-repeat;
+      pointer-events: none;
+    }
+    .rl-li-swap:hover { color: var(--red-acc,${BRAND}); border-color: var(--red-acc,${BRAND}); }
+    /* Aspect-ratio preview block under W / H fields. */
+    .rl-li-wh-preview {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      margin-top: 8px;
+    }
+    .rl-li-wh-rect {
+      background: color-mix(in srgb, var(--red-acc,${BRAND}) 18%, transparent);
+      border: 1px solid var(--red-acc,${BRAND});
+      border-radius: 2px;
+      transition: width 0.12s ease, height 0.12s ease;
+    }
+    .rl-li-wh-rect-label {
+      font-size: 9px;
+      color: #999;
+      font-family: inherit;
+    }
+    /* Tiny aspect-ratio shape rendered INSIDE each Match-ratio chip,
+       same idea Resolution Reaper uses to make every ratio recognisable
+       at a glance without reading the label. */
+    .rl-li-ratio-chip {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+    .rl-li-shape {
+      display: inline-block;
+      background: rgba(180,180,180,0.25);
+      border: 1px solid #888;
+      border-radius: 1px;
+      box-sizing: border-box;
+      flex-shrink: 0;
+    }
+    .rl-li-ratio-chip.active .rl-li-shape {
+      background: rgba(255,255,255,0.4);
+      border-color: rgba(255,255,255,0.85);
+    }
+    /* Custom chip has no shape (no fixed aspect) — keep text-only. */
+    .rl-li-ratio-chip.rl-li-ratio-custom-chip { display: block; }
+    .rl-li-global {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .rl-li-rs-popup {
+      position: fixed;
+      z-index: 99999;
+      background: #1d1d1d;
+      border: 1px solid #444;
+      border-radius: 4px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      font-size: 11px;
+      color: #ccc;
+      min-width: 200px;
+      overflow: hidden;
+    }
+    .rl-li-rs-item {
+      padding: 6px 10px;
+      cursor: pointer;
+      border-bottom: 1px solid #2a2a2a;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .rl-li-rs-item:last-child { border-bottom: none; }
+    .rl-li-rs-item:hover { background: #2a2a2a; }
+    .rl-li-rs-item.active .rl-li-rs-item-label { color: var(--red-acc,${BRAND}); font-weight: 600; }
+    .rl-li-rs-item-label { font-size: 11px; }
+    .rl-li-rs-item-hint { font-size: 9px; color: #777; }
+    /* ── Image Resize design language, scoped to .rl-li-root ── */
+    /* Centered snap footer: magnet + "Snap" + chips. */
+    .rl-li-foot { display:flex; align-items:center; justify-content:center; gap:6px; flex-wrap:wrap; }
+    .rl-li-snap2 { display:inline-flex; align-items:center; gap:5px; }
+    .rl-li-snap-icon { display:inline-block; width:12px; height:12px; background-color:#888; flex:none;
+      -webkit-mask:url("/reaper/assets/icons/ui/magnet.svg") center/12px 12px no-repeat;
+              mask:url("/reaper/assets/icons/ui/magnet.svg") center/12px 12px no-repeat; }
+    .rl-li-snap-lbl { font-size:9px; color:#7d7d7d; text-transform:uppercase; letter-spacing:.5px; }
+    .rl-li-schip { background:#1d1d1d; border:1px solid #444; border-radius:3px; color:#aaa;
+      font-size:8.5px; padding:3px 5px; min-width:16px; text-align:center; cursor:pointer; user-select:none; }
+    .rl-li-schip:hover { border-color:var(--red-acc,${BRAND}); color:#ddd; }
+    .rl-li-schip.active { background:var(--red-acc,${BRAND}); color:#fff; border-color:var(--red-acc,${BRAND}); }
+    /* Resample picker: [◀] [ Resample: Auto ▾ ] [▶] */
+    .rl-li-rs2-row { display:flex; align-items:stretch; gap:6px; }
+    .rl-li-rs2-nav { flex:0 0 30px; background:#1d1d1d; border:1px solid #444; border-radius:4px;
+      color:var(--red-acc,${BRAND}); font-size:11px; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+    .rl-li-rs2-nav:hover { border-color:var(--red-acc,${BRAND}); }
+    .rl-li-rs2-dd { flex:1; display:flex; align-items:center; justify-content:space-between;
+      background:#1d1d1d; border:1px solid #444; border-radius:4px; padding:6px 10px; cursor:pointer; user-select:none; }
+    .rl-li-rs2-dd:hover { border-color:var(--red-acc,${BRAND}); }
+    .rl-li-rs2-value { color:#ddd; font-size:11px; }
+    .rl-li-rs2-arrow { color:var(--red-acc,${BRAND}); font-size:13px; margin-left:6px; line-height:1; }
+    /* Upscaling toggle button. */
+    .rl-li-upbtn { align-self:center; background:#1d1d1d; border:1px solid #444; border-radius:5px;
+      color:#aaa; font-size:11px; padding:7px 18px; cursor:pointer; user-select:none; transition:background .08s,border-color .08s; }
+    .rl-li-upbtn:hover { border-color:var(--red-acc,${BRAND}); color:#ddd; }
+    .rl-li-upbtn.is-on, .rl-li-upbtn.is-on:hover { background:var(--red-acc,${BRAND}); border-color:var(--red-acc,${BRAND}); color:#fff; }
+    /* Per-mode panel overrides (mirror image_resize .rl-ir-root .rl-li-* block). */
+    .rl-li-root .rl-li-panel { background:rgba(255,255,255,.04); border:none; border-radius:6px; padding:9px 10px; }
+    .rl-li-root .rl-li-panel-readout { display:none; }
+    .rl-li-root .rl-li-ratio-chips { margin-bottom:0; }
+    .rl-li-root .rl-li-custom-ratio-row { margin:8px 0 0; }
+    .rl-li-root .rl-li-input-wide { width:100% !important; max-width:none; }
+    .rl-li-root .rl-li-numinput { background:#1d1d1d !important; align-items:center; min-height:28px; }
+    .rl-li-root .rl-li-numinput .rl-li-spin { align-self:stretch; }
+    .rl-li-root .rl-li-numinput input { line-height:1.2; background:transparent !important; border:none !important; border-radius:0 !important; }
+    .rl-li-root .rl-li-inline-label { display:flex; align-items:center; color:#FFF); font-size:9px; font-weight:600;
+      text-transform:uppercase; letter-spacing:.5px; padding:0 4px 0 9px; white-space:nowrap; flex:none; }
+    .rl-li-root .rl-li-num-labeled input { text-align:right !important; padding-right:8px !important; }
+    .rl-li-root .rl-li-swap { background:#1d1d1d !important; }
+    .rl-li-root .rl-li-wh-header { text-align:center !important; color:#d6d6d6 !important; }
+    .rl-li-root .rl-li-wh-rect { background:color-mix(in srgb, var(--red-acc,${BRAND}) 35%, transparent); border-width:2px; }
+    .rl-li-root .rl-li-wh-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; align-items:center; }
+    .rl-li-root .rl-li-wh-col { display:flex; flex-direction:column; gap:6px; min-width:0; }
+    .rl-li-root .rl-li-wh-col .rl-li-swap { width:100%; height:24px; align-self:auto; }
+    .rl-li-root .rl-li-wh-grid .rl-li-wh-preview { margin-top:0; justify-content:center; }
+    /* Filled triangle spinner glyphs (replace shared outline chevrons). NOTE:
+       use the literal triangle characters - a backslash-escape inside a JS
+       template literal throws (CLAUDE.md UI Pattern #12). */
+    .rl-li-root .rl-li-spin { width:16px; border-left:none; }
+    .rl-li-root .rl-li-spin > button { background:transparent; }
+    .rl-li-root .rl-li-spin-up::before, .rl-li-root .rl-li-spin-down::before {
+      border:none; width:auto; height:auto; font-size:8px; line-height:1; transform:translate(-50%,-50%); }
+    .rl-li-root .rl-li-spin-up::before { content:"▲"; }
+    .rl-li-root .rl-li-spin-down::before { content:"▼"; }
+    /* Crop-to-fill extras: Fill/Crop toggle + 3x3 anchor grid. */
+    .rl-li-root .rl-li-swaprow { display:flex; gap:6px; align-items:stretch; }
+    .rl-li-root .rl-li-wh-col .rl-li-swaprow .rl-li-swap { flex:0 0 46px; width:auto; height:auto; align-self:stretch; }
+    .rl-li-root .rl-li-fillcrop { flex:1; display:grid; grid-template-columns:1fr 1fr; background:#1d1d1d; border:1px solid #444; border-radius:4px; overflow:hidden; }
+    .rl-li-root .rl-li-fillcrop > div { display:flex; align-items:center; justify-content:center; font-size:9.5px; padding:5px 0; color:#aaa; cursor:pointer; user-select:none; }
+    .rl-li-root .rl-li-fillcrop > div:hover { color:#ddd; background:rgba(255,255,255,.08); }
+    .rl-li-root .rl-li-fillcrop > div.active { background:var(--red-acc,${BRAND}); color:#fff; }
+    .rl-li-root .rl-li-anchor { display:grid; grid-template-columns:repeat(3,1fr); grid-template-rows:repeat(3,1fr); gap:3px;
+      width:100%; max-width:96px; aspect-ratio:1; margin:0 auto; background:#1d1d1d; border:1px solid #444; border-radius:5px; padding:5px; box-sizing:border-box; }
+    .rl-li-root .rl-li-anchor-cell { background:rgba(255,255,255,.07); border-radius:2px; cursor:pointer; transition:background .08s; }
+    .rl-li-root .rl-li-anchor-cell:hover { background:rgba(255,255,255,.18); }
+    .rl-li-root .rl-li-anchor-cell.active { background:var(--red-acc,${BRAND}); }
+    /* Bring shared quick-pick + ratio chips in line (orange hover). */
+    .rl-li-root .rl-li-quickpick { box-sizing:border-box; }
+    .rl-li-root .rl-li-quickpick:hover { border-color:var(--red-acc,${BRAND}); color:#ddd; }
+    .rl-li-root .rl-li-ratio-chip { box-sizing:border-box; }
+    .rl-li-root .rl-li-ratio-chip:hover { border-color:var(--red-acc,${BRAND}); color:#ddd; }
+    /* ── B2 thumbnail dropdown popup ── */
+    .rl-li-popup {
+      background:#1d1d1d; border:1px solid #444; border-radius:6px;
+      box-shadow:0 4px 16px rgba(0,0,0,.4); font-size:11px;
+      font-family:ui-sans-serif,system-ui,sans-serif; color:#ccc; overflow:hidden;
+    }
+    .rl-li-pop-search { display:flex; align-items:center; gap:7px; padding:7px 9px;
+      background:#161616; border-bottom:1px solid #333; }
+    .rl-li-pop-mag { width:12px; height:12px; flex:none; border:1.6px solid #777; border-radius:50%; position:relative; }
+    .rl-li-pop-mag::after { content:""; position:absolute; width:5px; height:1.6px; background:#777;
+      transform:rotate(45deg); right:-3px; bottom:0; }
+    .rl-li-pop-search input { flex:1; min-width:0; background:transparent; border:none; outline:none;
+      color:#ddd; font-size:11px; font-family:inherit; }
+    .rl-li-pop-search input::placeholder { color:#777; }
+    .rl-li-pop-sizetoggle { flex:none; display:flex; border:1px solid #444; border-radius:4px; overflow:hidden; }
+    .rl-li-pop-sizetoggle span { padding:2px 7px; font-size:10px; color:#aaa; cursor:pointer; user-select:none; line-height:1.4; }
+    .rl-li-pop-sizetoggle span.on { background:var(--red-acc,${BRAND}); color:#fff; }
+    .rl-li-pop-sizetoggle span:not(.on):hover { color:#ddd; }
+    .rl-li-bsplit { display:flex; max-height:320px; }
+    .rl-li-bfolders { width:104px; flex:none; border-right:1px solid #333; background:#141414; overflow:auto; }
+    .rl-li-bfolder { padding:8px 9px; font-size:10.5px; color:#aaa; cursor:pointer; display:flex;
+      justify-content:space-between; gap:4px; align-items:center; }
+    .rl-li-bfolder:hover { background:#2a2a2a; }
+    .rl-li-bfolder.on { background:color-mix(in srgb, var(--red-acc,${BRAND}) 16%, transparent); color:var(--red-acc,${BRAND}); border-left:2px solid var(--red-acc,${BRAND}); padding-left:7px; }
+    .rl-li-bfolder.all { border-bottom:1px solid #333; color:#cfcfcf; }
+    .rl-li-bfolder.all.on { color:var(--red-acc,${BRAND}); }
+    .rl-li-bfolder-n { color:#888; font-size:9px; flex:none; }
+    .rl-li-bfolder > span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+    .rl-li-bpane { flex:1; min-width:0; overflow:auto; max-height:320px; }
+    .rl-li-pop-sec { padding:5px 10px 4px; font-size:9px; color:#777; text-transform:uppercase; letter-spacing:.5px;
+      background:#141414; border-bottom:1px solid #333; display:flex; align-items:center; gap:6px; position:sticky; top:0; z-index:1; }
+    .rl-li-pop-sec-c { margin-left:auto; color:#888; }
+    .rl-li-imgrow { display:flex; align-items:center; gap:9px; padding:4px 10px; cursor:pointer; }
+    .rl-li-imgrow:hover { background:#2a2a2a; }
+    .rl-li-imgrow.cur { background:color-mix(in srgb, var(--red-acc,${BRAND}) 12%, transparent); }
+    .rl-li-imgrow.cur .rl-li-imgrow-lbl { color:var(--red-acc,${BRAND}); font-weight:600; }
+    .rl-li-imgrow-lbl { flex:1; min-width:0; font-size:11px; color:#ccc; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .rl-li-pop-thumb { position:relative; flex:none; border-radius:4px; overflow:hidden;
+      background:linear-gradient(135deg,#3a3f4a,#222); }
+    .rl-li-pop-thumb img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block; }
+    .rl-li-pop-glyph { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+      font-size:10px; color:rgba(255,255,255,.3); }
+    .rl-li-bsplit.thumb-sm .rl-li-pop-thumb { width:48px; height:48px; }
+    .rl-li-bsplit.thumb-lg .rl-li-pop-thumb { width:96px; height:96px; }
+    .rl-li-bsplit.thumb-xl .rl-li-pop-thumb { width:128px; height:128px; }
+    .rl-li-pop-empty { padding:10px; color:#666; text-align:center; }
+    .rl-li-pop-foot { padding:6px 10px; font-size:9px; color:#777; background:#141414;
+      border-top:1px solid #333; text-align:center; }
+  `;
+  const el = document.createElement("style");
+  el.id = "reaper-load-image-css";
+  el.textContent = css;
+  document.head.appendChild(el);
+}
+
+export function buildRoot() {
+  const root = document.createElement("div");
+  root.className = "rl-li-root";
+
+  // Upload button (orange, prominent, primary action).
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "rl-li-upload-btn";
+  const ico = document.createElement("span");
+  ico.className = "ico";
+  const lbl = document.createElement("span");
+  lbl.textContent = "Upload Image";
+  btn.append(ico, lbl);
+  root.appendChild(btn);
+
+  // Hint line for alternate upload methods (shown when no image yet).
+  const hint = document.createElement("div");
+  hint.className = "rl-li-hint";
+  hint.dataset.role = "hint";
+  hint.innerHTML = `or drag here · paste with <kbd>Ctrl+V</kbd>`;
+  root.appendChild(hint);
+
+  // File row: [◀ prev] [ filename dropdown ] [▶ next]. Arrow buttons cycle
+  // through input/ images so users can flip through them visually, matching
+  // native ComfyUI LoadImage. Both the prev/next arrows and PageUp/PageDown
+  // (wired in index.js) route through setSelectedImage so the bottom preview
+  // updates immediately.
+  const fileRow = document.createElement("div");
+  fileRow.className = "rl-li-filerow";
+
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.className = "rl-li-nav";
+  prev.dataset.role = "prev";
+  prev.title = "Previous image (PageUp)";
+  prev.textContent = "◀";
+
+  const dd = document.createElement("div");
+  dd.className = "rl-li-dropdown";
+  dd.dataset.role = "dropdown";
+  dd.innerHTML = `<span class="name">— no image —</span><span class="counter" data-role="counter"></span><span class="arrow">▼</span>`;
+
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "rl-li-nav";
+  next.dataset.role = "next";
+  next.title = "Next image (PageDown)";
+  next.textContent = "▶";
+
+  fileRow.append(prev, dd, next);
+  root.appendChild(fileRow);
+
+  // The input/output size readout is no longer a DOM bar here — it is painted
+  // by onDrawForeground (INPUT → OUTPUT cards in the output-slot dead space).
+
+  return root;
+}
+
+// Hides every auto-created widget so we can render our own UI in the DOM
+// widget. `image_upload: True` creates TWO widgets in INPUT_TYPES on the
+// Vue frontend: the `image` combo + a separate `upload` button widget — both
+// need to be hidden, plus any other auto-created widget that isn't ours.
+//
+// Uses the same multi-technique pattern as shared/utils.mjs `hideJsonWidget`:
+// setting `canvasOnly` alone is not enough for canvas drawing on the current
+// Vue frontend — must also set `hidden=true`, zero `computeSize`, and hide
+// any DOM element. Returns the `image` combo widget so callers can read /
+// write its `.value` (that drives the actual file selection).
+export function hideNativeImageCombo(node) {
+  let imageWidget = null;
+  for (const w of (node.widgets || [])) {
+    if (!w) continue;
+    if (w.name === "image") imageWidget = w;
+    w.hidden = true;
+    w.computeSize = () => [0, -4];
+    if (!w.options) w.options = {};
+    w.options.canvasOnly = true;
+    if (w.element) w.element.style.display = "none";
+  }
+  // Vue may DOM-render an upload widget AFTER nodeCreated — re-hide on the
+  // next animation frame as a belt-and-braces. Mirrors hideJsonWidget.
+  requestAnimationFrame(() => {
+    for (const w of (node.widgets || [])) {
+      if (!w || w.name === "reaper_load_image_ui") continue;
+      const _el = w.element || w.inputEl; // prefer .element; .inputEl only on old builds (no deprecation warning)
+      if (_el) _el.style.display = "none";
+    }
+  });
+  return imageWidget;
+}
+
+import { updateNativePreview, setSelectedImage, splitFilenameSubfolder } from "./api.mjs";
+
+// Group combo values by subfolder so the popup renders:
+//   ─ root ─
+//      file1.png
+//      file2.png
+//   ─ Studio1 ─
+//      bunny.png
+// Returns an array of { folder, files } in display order (root first, then
+// folders alphabetised). Each `files` entry is { full, name } where `full`
+// is the value to write back and `name` is the bare filename to display.
+function groupValuesByFolder(values) {
+  const map = new Map();
+  for (const v of values) {
+    const { subfolder, filename } = splitFilenameSubfolder(v);
+    if (!map.has(subfolder)) map.set(subfolder, []);
+    map.get(subfolder).push({ full: v, name: filename });
+  }
+  // Sort the file lists alphabetically. Folders: root first, then ABC.
+  for (const list of map.values()) list.sort((a, b) => a.name.localeCompare(b.name));
+  const folders = [...map.keys()].sort((a, b) => {
+    if (a === "" && b !== "") return -1;
+    if (a !== "" && b === "") return 1;
+    return a.localeCompare(b);
+  });
+  return folders.map((folder) => ({ folder, files: map.get(folder) }));
+}
+
+// Build a same-origin /view URL for a combo value like "3d/cat.png".
+// Relative path → works on whatever host/port ComfyUI runs on. No cache-buster
+// so the browser caches thumbnails across re-opens.
+function thumbURL(full) {
+  const { subfolder, filename } = splitFilenameSubfolder(full);
+  return `/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}`;
+}
+
+// Read/write the persisted thumbnail size ("Small" | "Large" | "XL"). Falls
+// back to "Large" if the setting isn't registered yet or settings aren't ready.
+function getThumbSize() {
+  try {
+    const v = app.ui.settings.getSettingValue("Reaper.LoadImage.ThumbSize");
+    return v === "Small" || v === "XL" ? v : "Large";
+  } catch (_e) { return "Large"; }
+}
+function setThumbSize(v) {
+  try {
+    const s = app.ui.settings;
+    // Prefer the async setter when present (newer ComfyUI persists reliably
+    // through it; the sync form can no-op on disk on some builds) — same guard
+    // node_colors/index.js uses.
+    if (typeof s.setSettingValueAsync === "function") s.setSettingValueAsync("Reaper.LoadImage.ThumbSize", v);
+    else s.setSettingValue("Reaper.LoadImage.ThumbSize", v);
+  } catch (_e) { /* ignore */ }
+}
+
+// Open a thumbnail picker popup anchored below the file row.
+//  - Search box filters across ALL folders while it has text.
+//  - Left sidebar (only when subfolders exist) lists All + each folder.
+//  - Right pane shows thumbnail rows; opens to "All" grouped by folder.
+//  - Small/Large/XL thumbnail size toggle, persisted via the ThumbSize setting.
+// Reuses groupValuesByFolder, splitFilenameSubfolder, setSelectedImage.
+export function openImageDropdown(node, anchorEl, onPick) {
+  const imageWidget = node._redLiImageWidget;
+  if (!imageWidget) return;
+  const values = imageWidget.options?.values || [];
+
+  // Close any existing popup. Call its stored cleanup (not a bare remove) so
+  // the prior popup's document-level capture listeners are detached too.
+  const _existingPopup = document.querySelector(".rl-li-popup");
+  if (_existingPopup) {
+    if (typeof _existingPopup._redClose === "function") _existingPopup._redClose();
+    else _existingPopup.remove();
+  }
+
+  const popup = document.createElement("div");
+  popup.className = "rl-li-popup";
+  const rect = anchorEl.getBoundingClientRect();
+  const width = Math.max(rect.width, 360); // widen so sidebar + thumbs fit
+  Object.assign(popup.style, {
+    position: "fixed",
+    zIndex: 99999,
+    left: `${rect.left}px`,
+    top: `${rect.bottom + 2}px`,
+    width: `${width}px`,
+  });
+
+  // ── close handling (defined early so row click handlers can call it) ──
+  function closePopup() {
+    popup.remove();
+    document.removeEventListener("mousedown", onDocDown, true);
+    document.removeEventListener("pointerdown", onDocDown, true);
+    document.removeEventListener("wheel", onWheel, true);
+    document.removeEventListener("keydown", onKey, true);
+  }
+  const onDocDown = (e) => { if (!popup.contains(e.target)) closePopup(); };
+  const onWheel = (e) => { if (!popup.contains(e.target)) closePopup(); };
+  const onKey = (e) => { if (e.key === "Escape") closePopup(); };
+  popup._redClose = closePopup; // so a later open can detach our listeners
+
+  if (values.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "rl-li-pop-empty";
+    empty.textContent = "(no images uploaded yet)";
+    popup.appendChild(empty);
+    document.body.appendChild(popup);
+    setTimeout(() => {
+      document.addEventListener("mousedown", onDocDown, true);
+      document.addEventListener("pointerdown", onDocDown, true);
+      document.addEventListener("wheel", onWheel, true);
+      document.addEventListener("keydown", onKey, true);
+    }, 0);
+    return;
+  }
+
+  const groups = groupValuesByFolder(values); // [{folder, files:[{full,name}]}], root first
+  const curVal = imageWidget.value;
+  const hasSubfolders = groups.some((g) => g.folder !== "");
+
+  // ── state ──
+  let activeFolder = "__all"; // "__all" | "" (root) | "<FolderName>"
+  let query = "";
+  let thumbSize = getThumbSize();
+  let scrollTarget = null;
+
+  // ── search row (filter + size toggle) ──
+  const searchRow = document.createElement("div");
+  searchRow.className = "rl-li-pop-search";
+  const mag = document.createElement("span");
+  mag.className = "rl-li-pop-mag";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Filter images…";
+  const sizeToggle = document.createElement("div");
+  sizeToggle.className = "rl-li-pop-sizetoggle";
+  const segS = document.createElement("span"); segS.textContent = "S"; segS.title = "Small thumbnails";
+  const segL = document.createElement("span"); segL.textContent = "L"; segL.title = "Large thumbnails";
+  const segXL = document.createElement("span"); segXL.textContent = "XL"; segXL.title = "Extra-large thumbnails (128 × 128)";
+  sizeToggle.append(segS, segL, segXL);
+  searchRow.append(mag, input, sizeToggle);
+  popup.appendChild(searchRow);
+
+  // ── body: sidebar (optional) + scrollable pane ──
+  const body = document.createElement("div");
+  body.className = "rl-li-bsplit";
+  const sidebar = document.createElement("div");
+  sidebar.className = "rl-li-bfolders";
+  const pane = document.createElement("div");
+  pane.className = "rl-li-bpane";
+  if (hasSubfolders) body.append(sidebar, pane);
+  else body.append(pane);
+  popup.appendChild(body);
+
+  // ── footer ──
+  const footer = document.createElement("div");
+  footer.className = "rl-li-pop-foot";
+  popup.appendChild(footer);
+
+  // ── element builders ──
+  const makeRow = (entry) => {
+    const row = document.createElement("div");
+    row.className = "rl-li-imgrow" + (entry.full === curVal ? " cur" : "");
+    const th = document.createElement("span");
+    th.className = "rl-li-pop-thumb";
+    const glyph = document.createElement("span");
+    glyph.className = "rl-li-pop-glyph";
+    glyph.textContent = "▣";
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.onerror = () => { img.style.display = "none"; };
+    img.src = thumbURL(entry.full);
+    th.append(glyph, img);
+    const lbl = document.createElement("span");
+    lbl.className = "rl-li-imgrow-lbl";
+    lbl.textContent = entry.name;
+    lbl.title = entry.full;
+    row.append(th, lbl);
+    if (entry.full === curVal) scrollTarget = row;
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setSelectedImage(node, entry.full);
+      closePopup();
+      if (onPick) onPick(entry.full);
+    });
+    return row;
+  };
+  const makeSec = (label, count) => {
+    const s = document.createElement("div");
+    s.className = "rl-li-pop-sec";
+    s.textContent = label;
+    const c = document.createElement("span");
+    c.className = "rl-li-pop-sec-c";
+    c.textContent = String(count);
+    s.appendChild(c);
+    return s;
+  };
+  const folderLabel = (key) => (key === "" ? "root" : key);
+  // Scroll the current image's row into view (deferred so the pane is laid out).
+  // Called on every non-search render so a folder switch / search-clear re-centers it.
+  const scrollCurrentIntoView = () => {
+    if (!scrollTarget) return;
+    const t = scrollTarget;
+    queueMicrotask(() => { try { t.scrollIntoView({ block: "nearest" }); } catch (_e) { /* ignore */ } });
+  };
+
+  // ── renderers ──
+  const renderSidebar = () => {
+    if (!hasSubfolders) return;
+    sidebar.replaceChildren();
+    const entries = [["__all", "All", values.length]];
+    for (const g of groups) entries.push([g.folder, folderLabel(g.folder), g.files.length]);
+    for (const [key, label, count] of entries) {
+      const f = document.createElement("div");
+      f.className = "rl-li-bfolder"
+        + (key === "__all" ? " all" : "")
+        + (key === activeFolder && !query.trim() ? " on" : "");
+      const t = document.createElement("span");
+      t.textContent = label;
+      const n = document.createElement("span");
+      n.className = "rl-li-bfolder-n";
+      n.textContent = String(count);
+      f.append(t, n);
+      f.addEventListener("click", (e) => {
+        e.stopPropagation();
+        activeFolder = key;
+        input.value = "";
+        query = "";
+        renderSidebar();
+        renderPane();
+      });
+      sidebar.appendChild(f);
+    }
+  };
+
+  const renderPane = () => {
+    pane.replaceChildren();
+    scrollTarget = null;
+    const q = query.trim().toLowerCase();
+
+    if (q) {
+      // Search across ALL folders; show only matches, grouped by folder.
+      let matches = 0;
+      for (const g of groups) {
+        const hit = g.files.filter((f) => f.name.toLowerCase().includes(q));
+        if (hit.length === 0) continue;
+        matches += hit.length;
+        pane.appendChild(makeSec(folderLabel(g.folder), hit.length));
+        for (const entry of hit) pane.appendChild(makeRow(entry));
+      }
+      if (matches === 0) {
+        const none = document.createElement("div");
+        none.className = "rl-li-pop-empty";
+        none.textContent = "(no matches)";
+        pane.appendChild(none);
+      }
+      footer.textContent = `${matches} match${matches === 1 ? "" : "es"}`;
+      return;
+    }
+
+    if (!hasSubfolders) {
+      // Flat input/ — plain thumbnail list, no sidebar.
+      for (const g of groups) for (const entry of g.files) pane.appendChild(makeRow(entry));
+      footer.textContent = `${values.length} image${values.length === 1 ? "" : "s"}`;
+      scrollCurrentIntoView();
+      return;
+    }
+
+    if (activeFolder === "__all") {
+      // All images, grouped by folder with sticky section headers.
+      for (const g of groups) {
+        pane.appendChild(makeSec(folderLabel(g.folder), g.files.length));
+        for (const entry of g.files) pane.appendChild(makeRow(entry));
+      }
+      footer.textContent = `${values.length} image${values.length === 1 ? "" : "s"} · all`;
+    } else {
+      const g = groups.find((x) => x.folder === activeFolder);
+      const files = g ? g.files : [];
+      for (const entry of files) pane.appendChild(makeRow(entry));
+      footer.textContent = `${files.length} image${files.length === 1 ? "" : "s"} · ${folderLabel(activeFolder)}`;
+    }
+    scrollCurrentIntoView();
+  };
+
+  const applyThumbSize = () => {
+    body.classList.toggle("thumb-sm", thumbSize === "Small");
+    body.classList.toggle("thumb-lg", thumbSize === "Large");
+    body.classList.toggle("thumb-xl", thumbSize === "XL");
+    segS.classList.toggle("on", thumbSize === "Small");
+    segL.classList.toggle("on", thumbSize === "Large");
+    segXL.classList.toggle("on", thumbSize === "XL");
+  };
+
+  // ── events ──
+  input.addEventListener("input", () => { query = input.value; renderSidebar(); renderPane(); });
+  input.addEventListener("click", (e) => e.stopPropagation());
+  // Keep LiteGraph's canvas shortcuts (Delete/Backspace = delete the selected
+  // node, arrows = nudge, etc.) from firing while typing in the filter box —
+  // the node is selected whenever this popup is open. Mirrors makeNumericInput
+  // (Load Image Pattern #6). Enter picks the first listed match.
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      pane.querySelector(".rl-li-imgrow")?.click();
+    }
+    e.stopImmediatePropagation();
+  });
+  segS.addEventListener("click", (e) => {
+    e.stopPropagation();
+    thumbSize = "Small"; setThumbSize(thumbSize); applyThumbSize();
+  });
+  segL.addEventListener("click", (e) => {
+    e.stopPropagation();
+    thumbSize = "Large"; setThumbSize(thumbSize); applyThumbSize();
+  });
+  segXL.addEventListener("click", (e) => {
+    e.stopPropagation();
+    thumbSize = "XL"; setThumbSize(thumbSize); applyThumbSize();
+  });
+
+  // ── initial render ──
+  applyThumbSize();
+  renderSidebar();
+  renderPane();
+
+  document.body.appendChild(popup);
+
+  // Keep the popup on-screen: clamp horizontally and flip above the row when it
+  // would overflow the bottom of the viewport (now measurable post-append).
+  const pr = popup.getBoundingClientRect();
+  let left = rect.left;
+  if (left + pr.width > window.innerWidth - 4) left = Math.max(4, window.innerWidth - pr.width - 4);
+  popup.style.left = `${left}px`;
+  if (pr.bottom > window.innerHeight - 4) {
+    const above = rect.top - pr.height - 2;
+    popup.style.top = `${above >= 4 ? above : Math.max(4, window.innerHeight - pr.height - 4)}px`;
+  }
+
+  // renderPane() already scrolls the current row into view. Focus the filter box.
+  queueMicrotask(() => { try { input.focus(); } catch (_e) { /* ignore */ } });
+
+  // Attach close listeners after the opening click settles (capture phase so we
+  // preempt LiteGraph; each gated on !popup.contains so inside scroll/clicks
+  // don't close — Load Image Pattern #14).
+  setTimeout(() => {
+    document.addEventListener("mousedown", onDocDown, true);
+    document.addEventListener("pointerdown", onDocDown, true);
+    document.addEventListener("wheel", onWheel, true);
+    document.addEventListener("keydown", onKey, true);
+  }, 0);
+}
+
+const MODE_CHIPS = [
+  { id: "off",          label: "Off",          title: "No resize. (Snap still applies if set.)" },
+  { id: "max_mp",       label: "Max MP",       title: "Scale so the total pixel count stays under a megapixel cap. Keeps aspect ratio." },
+  { id: "longest_side", label: "Longest side", title: "Scale so the longest side equals this many pixels. Keeps aspect ratio." },
+  { id: "scale_factor", label: "Scale by ×",   title: "Multiply both dimensions by a factor. Keeps aspect ratio." },
+  { id: "fit_inside",   label: "Fit inside",   title: "Scale to fit entirely within W×H without cropping. Keeps aspect ratio." },
+  { id: "cover",        label: "Crop to fill", title: "Resize to exactly W×H. Fill scales then crops the overflow; Crop cuts a 1:1-pixel piece. The anchor picks which part is kept." },
+  { id: "match_ratio",  label: "Match ratio",  title: "Crop the image to a target aspect ratio (no scaling)." },
+  { id: "pad",          label: "Pad",          title: "Add a pixel border on chosen sides. The new area becomes the white inpaint-mask region." },
+];
+
+export function renderChips(state) {
+  const wrap = document.createElement("div");
+  wrap.className = "rl-li-chips";
+  for (const c of MODE_CHIPS) {
+    const el = document.createElement("div");
+    el.className = "rl-li-chip" + (state.mode === c.id ? " active" : "");
+    el.dataset.modeId = c.id;
+    el.textContent = c.label;
+    el.title = c.title || "";
+    wrap.appendChild(el);
+  }
+  return wrap;
+}
+
+const SNAP_OPTIONS = [0, 8, 16, 32, 64];
+const RESAMPLE_OPTIONS = [
+  { id: "auto",     label: "Auto",     hint: "Lanczos for shrink, Bilinear for grow" },
+  { id: "nearest",  label: "Nearest",  hint: "Pixel-perfect, no smoothing" },
+  { id: "bilinear", label: "Bilinear", hint: "Fast, smooth" },
+  { id: "bicubic",  label: "Bicubic",  hint: "Slower, sharper" },
+  { id: "lanczos",  label: "Lanczos",  hint: "Slowest, sharpest" },
+];
+
+// Custom resample dropdown popup. Same look as the file dropdown popup —
+// fixed-position list anchored to the row, click an item to commit.
+function openResamplePopup(anchorEl, currentValue, onPick) {
+  document.querySelector(".rl-li-rs-popup")?.remove();
+
+  const popup = document.createElement("div");
+  popup.className = "rl-li-rs-popup";
+  const rect = anchorEl.getBoundingClientRect();
+  popup.style.left = `${rect.left}px`;
+  popup.style.top  = `${rect.bottom + 2}px`;
+  popup.style.width = `${rect.width}px`;
+
+  for (const opt of RESAMPLE_OPTIONS) {
+    const item = document.createElement("div");
+    item.className = "rl-li-rs-item" + (opt.id === currentValue ? " active" : "");
+    const lbl = document.createElement("span");
+    lbl.className = "rl-li-rs-item-label";
+    lbl.textContent = opt.label;
+    const hint = document.createElement("span");
+    hint.className = "rl-li-rs-item-hint";
+    hint.textContent = opt.hint;
+    item.append(lbl, hint);
+    item.addEventListener("click", (e) => {
+      e.stopPropagation();
+      onPick(opt.id);
+      close();
+    });
+    popup.appendChild(item);
+  }
+
+  document.body.appendChild(popup);
+
+  function close() {
+    popup.remove();
+    document.removeEventListener("mousedown", onDocDown, true);
+    document.removeEventListener("pointerdown", onDocDown, true);
+    document.removeEventListener("wheel", onWheel, true);
+    document.removeEventListener("keydown", onKey, true);
+  }
+  const onDocDown = (e) => {
+    if (!popup.contains(e.target)) close();
+  };
+  const onWheel = (e) => {
+    if (!popup.contains(e.target)) close();
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+  };
+  setTimeout(() => {
+    document.addEventListener("mousedown", onDocDown, true);
+    document.addEventListener("pointerdown", onDocDown, true);
+    document.addEventListener("wheel", onWheel, true);
+    document.addEventListener("keydown", onKey, true);
+  }, 0);
+}
+
+export function renderGlobalControls(node, state, writeState, onChange) {
+  const wrap = document.createElement("div");
+  wrap.className = "rl-li-global";
+
+  // Centered snap footer: magnet + "Snap" + chips.
+  const foot = document.createElement("div");
+  foot.className = "rl-li-foot";
+  const snap = document.createElement("div");
+  snap.className = "rl-li-snap2";
+  const icon = document.createElement("span");
+  icon.className = "rl-li-snap-icon";
+  snap.appendChild(icon);
+  const lbl = document.createElement("span");
+  lbl.className = "rl-li-snap-lbl";
+  lbl.textContent = "Snap";
+  snap.appendChild(lbl);
+  for (const v of SNAP_OPTIONS) {
+    const b = document.createElement("div");
+    b.className = "rl-li-schip" + (v === (state.snap || 0) ? " active" : "");
+    b.dataset.v = String(v);
+    b.textContent = v === 0 ? "Off" : String(v);
+    b.title = v === 0 ? "No snapping."
+      : `Round the output dimensions down to a multiple of ${v} px (keeps latents aligned).`;
+    snap.appendChild(b);
+  }
+  foot.appendChild(snap);
+  wrap.appendChild(foot);
+
+  // Resample picker: [◀] [ Resample: Auto ▾ ] [▶]
+  const rsRow = document.createElement("div");
+  rsRow.className = "rl-li-rs2-row";
+  const prev = document.createElement("button");
+  prev.type = "button"; prev.className = "rl-li-rs2-nav"; prev.title = "Previous resample filter"; prev.textContent = "◀";
+  const dd = document.createElement("div");
+  dd.className = "rl-li-rs2-dd";
+  dd.title = "Resampling filter used when scaling. Click to pick, or use the arrows.";
+  const rsValue = document.createElement("span");
+  rsValue.className = "rl-li-rs2-value";
+  rsValue.textContent = "Resample: " + resampleLabel(state.resample || "auto");
+  const rsArrow = document.createElement("span");
+  rsArrow.className = "rl-li-rs2-arrow"; rsArrow.textContent = "▼";
+  dd.append(rsValue, rsArrow);
+  const next = document.createElement("button");
+  next.type = "button"; next.className = "rl-li-rs2-nav"; next.title = "Next resample filter"; next.textContent = "▶";
+  rsRow.append(prev, dd, next);
+  wrap.appendChild(rsRow);
+
+  // Upscaling toggle button.
+  const upBtn = document.createElement("button");
+  upBtn.type = "button";
+  upBtn.title = "Allow the image to grow larger than its original size. Off = never upscale.";
+  const upOn = state.allow_upscale !== false;
+  upBtn.className = "rl-li-upbtn" + (upOn ? " is-on" : "");
+  upBtn.textContent = upOn ? "Upscaling: On" : "Upscaling: Off";
+  wrap.appendChild(upBtn);
+
+  // ── events ──
+  const RESAMPLE_IDS = RESAMPLE_OPTIONS.map((o) => o.id);
+  const setResample = (id) => {
+    const s = readStateLocal(node);
+    writeState(node, { ...s, resample: id });
+    rsValue.textContent = "Resample: " + resampleLabel(id);
+    onChange?.();
+  };
+  const cycleResample = (delta) => {
+    const cur = (readStateLocal(node).resample) || "auto";
+    let i = RESAMPLE_IDS.indexOf(cur); if (i < 0) i = 0;
+    i = (i + delta + RESAMPLE_IDS.length) % RESAMPLE_IDS.length;
+    setResample(RESAMPLE_IDS[i]);
+  };
+  foot.addEventListener("click", (e) => {
+    const b = e.target.closest(".rl-li-schip");
+    if (!b) return;
+    e.stopPropagation();
+    const v = parseInt(b.dataset.v, 10);
+    for (const x of foot.querySelectorAll(".rl-li-schip")) x.classList.toggle("active", x === b);
+    writeState(node, { ...readStateLocal(node), snap: v });
+    onChange?.();
+  });
+  dd.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openResamplePopup(dd, (readStateLocal(node).resample) || "auto", setResample);
+  });
+  prev.addEventListener("click", (e) => { e.stopPropagation(); cycleResample(-1); });
+  next.addEventListener("click", (e) => { e.stopPropagation(); cycleResample(1); });
+  upBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const on = !(readStateLocal(node).allow_upscale !== false);
+    writeState(node, { ...readStateLocal(node), allow_upscale: on });
+    upBtn.classList.toggle("is-on", on);
+    upBtn.textContent = on ? "Upscaling: On" : "Upscaling: Off";
+    onChange?.();
+  });
+
+  return wrap;
+}
+
+// Local state read for event handlers (avoids depending on index.js import).
+function readStateLocal(node) {
+  try { return JSON.parse(node.properties?.loadImagePixState || "{}"); }
+  catch { return {}; }
+}
+
+// Map a resample id to its display label.
+function resampleLabel(id) {
+  const o = RESAMPLE_OPTIONS.find((x) => x.id === id) || RESAMPLE_OPTIONS[0];
+  return o.label;
+}
