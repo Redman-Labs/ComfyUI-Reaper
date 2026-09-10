@@ -74,10 +74,11 @@ class ReaperResizeImageMask(ResizeImageMaskNode):
                 io.Mask.Input(
                     "mask",
                     display_name="Mask",
+                    optional=True,
                     tooltip=(
-                        "Mask associated with the image. It receives the same "
-                        "resize operation and is aligned to the resized image's "
-                        "final width and height."
+                        "Optional mask associated with the image. When connected, "
+                        "it receives the same resize operation and is aligned to "
+                        "the resized image's final width and height."
                     ),
                 ),
                 *schema.inputs[1:],
@@ -103,8 +104,8 @@ class ReaperResizeImageMask(ResizeImageMaskNode):
                     id="Resize_Mask",
                     display_name="Resized Mask",
                     tooltip=(
-                        "Resized mask with exactly the same width and height "
-                        "as Resized Image."
+                        "Resized mask with exactly the same width and height as "
+                        "Resized Image, or no value when Mask is not connected."
                     ),
                 ),
             ],
@@ -241,9 +242,9 @@ class ReaperResizeImageMask(ResizeImageMaskNode):
     def execute(
         cls,
         image: io.Image.Type,
-        mask: io.Mask.Type,
         resize_type: ResizeImageMaskNode.ResizeTypedDict,
         scale_method: io.Combo.Type,
+        mask: io.Mask.Type | None = None,
         invert_mask: bool = False,
     ) -> io.NodeOutput:
         normalized_resize_type = cls._normalize_resize_settings(resize_type)
@@ -253,14 +254,20 @@ class ReaperResizeImageMask(ResizeImageMaskNode):
             scale_method,
         )
 
-        # Apply the selected built-in operation independently first. When the
-        # source image and mask already match, this preserves identical crop and
-        # aspect-ratio behavior for both tensors.
+        # Always resize the image. The optional mask is only touched when a mask
+        # socket is connected.
         resized_image = super().execute(
             image,
             resolved_method,
             normalized_resize_type,
         )[0]
+
+        if mask is None:
+            return io.NodeOutput(resized_image, None)
+
+        # Apply the selected built-in operation independently to a connected
+        # mask. When both sources already match, this preserves identical crop
+        # and aspect-ratio behavior for both tensors.
         resized_mask = super().execute(
             mask,
             resolved_method,

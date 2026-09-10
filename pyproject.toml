@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-Reaper"
 description = "Reaper suite for ComfyUI: Flow Control, Switches, Face Tools, Mask Tools, Image Compare, Pause Image, Resolution, Preview Image, Save Image, Text with Comments"
-version = "0.6.0"
+version = "0.6.1"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = { file = ["requirements.txt"] }
