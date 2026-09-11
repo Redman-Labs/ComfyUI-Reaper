@@ -4,7 +4,7 @@ A collection of 86 modern ComfyUI V3 / Nodes 2.0 custom nodes for image, mask, m
 
 Current release: **0.20.2**
 
-All nodes are grouped beneath the `Reaper` menu. Stable internal node IDs are retained when nodes move between categories so existing workflows continue to load.
+All nodes are grouped beneath the `Reaper` menu.
 
 ## Installation
 
