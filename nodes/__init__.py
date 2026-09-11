@@ -3,6 +3,7 @@ from .face_utilities import NODE_CLASSES as FACE_NODES
 from .flow_utilities import NODE_CLASSES as FLOW_NODES
 from .image_utilities import NODE_CLASSES as IMAGE_NODES
 from .in_out_painting_utilities import NODE_CLASSES as IN_OUT_PAINTING_NODES
+from .krea2_utilities import NODE_CLASSES as KREA2_NODES
 from .latent_utilities import NODE_CLASSES as LATENT_NODES
 from .mask_utilities import NODE_CLASSES as MASK_NODES
 from .model_utilities import NODE_CLASSES as MODEL_NODES
@@ -18,6 +19,7 @@ ALL_REAPER_NODES = [
     *FLOW_NODES,
     *IMAGE_NODES,
     *IN_OUT_PAINTING_NODES,
+    *KREA2_NODES,
     *LATENT_NODES,
     *MASK_NODES,
     *MODEL_NODES,

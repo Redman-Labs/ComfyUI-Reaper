@@ -1,16 +1,18 @@
 [project]
 name = "ComfyUI-Reaper"
 description = "Reaper suite for ComfyUI: Flow Control, Switches, Face Tools, Mask Tools, Image Compare, Pause Image, Resolution, Preview Image, Save Image, Text with Comments"
-version = "0.6.1"
+version = "0.20.0"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = { file = ["requirements.txt"] }
 
 
-#[project.urls]
-#Repository = "https://github.com/REPLACE_WITH_ACCOUNT/REPLACE_WITH_REPOSITORY"
-#Documentation = "https://github.com/REPLACE_WITH_ACCOUNT/REPLACE_WITH_REPOSITORY#readme"
-#"Bug Tracker" = "https://github.com/REPLACE_WITH_ACCOUNT/REPLACE_WITH_REPOSITORY/issues"
+[project.urls]
+Homepage = "https://github.com/Redman-Labs/ComfyUI-Reaper"
+Repository = "https://github.com/Redman-Labs/ComfyUI-Reaper"
+Documentation = "https://github.com/Redman-Labs/ComfyUI-Reaper#readme"
+Issues = "https://github.com/Redman-Labs/ComfyUI-Reaper/issues"
+Changelog = "https://github.com/Redman-Labs/ComfyUI-Reaper/blob/main/CHANGELOG.md"
 
 [tool.comfy]
 PublisherId = "Reaper"

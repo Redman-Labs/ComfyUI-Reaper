@@ -1,8 +1,9 @@
-# PyTorch, NumPy, Pillow, and safetensors support are provided by ComfyUI.
+# PyTorch, TorchVision, NumPy, Pillow, safetensors, and einops are provided by ComfyUI.
 color-matcher>=0.6.0
 kornia>=0.7.0
 mediapipe>=0.10.13
 onnxruntime>=1.17
+opencv-contrib-python>=4.9
 scikit-image>=0.22
 scipy>=1.11
 transformers>=4.38

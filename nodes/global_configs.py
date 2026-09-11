@@ -8,6 +8,7 @@ CATEGORIES = {
     "flow_utilities": "Reaper/Flow Control",
     "image_utilities": "Reaper/Image Utils",
     "in_out_painting_utilities": "Reaper/In-Outpainting Utils",
+    "krea2_utilities": "Reaper/Krea2 Utils",
     "latent_utilities": "Reaper/Latent Utils",
     "mask_utilities": "Reaper/Mask Utils",
     "model_utilities": "Reaper/Model Utils",

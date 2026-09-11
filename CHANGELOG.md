@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.20.0 - 2026-09-10
+
+- Added V3 ports of `Krea2 Edit (source patch)` and `Krea2 Edit (grounded
+  encode)` under `Reaper/Krea2 Utils`, preserving their original display titles and
+  Apache 2.0 attribution.
+- Added the V3 `Krea2T Text Encode - Weighted` node under `Reaper/Krea2 Utils`,
+  adapted from ComfyUI-Krea2T-Enhancer's attention-weighted phrase encoder.
+- Moved both Krea2T Enhancer nodes and their shared implementation into a
+  dedicated `Reaper/Krea2 Utils` category and `nodes/krea2_utilities` package.
+- Renamed the Krea2 category to `Reaper/Krea2 Utils` while preserving stable
+  internal node IDs for existing workflows.
+- Made the mask input on `Resize Image & Mask (Reaper)` optional. When no mask
+  is connected, the node resizes the image without requiring or processing one.
+- Added Civitai metadata extraction support for `Save Image (Reaper)`, including
+  graph traversal, metadata helpers, and model-hash caching.
+- Updated package metadata, repository URLs, dependency declarations, and the
+  README's complete 85-node catalog and current project structure.
 - Added a live Resource Monitor to the ComfyUI menu for CPU, RAM, NVIDIA GPU,
   VRAM, GPU temperature, and output-disk usage. Each metric and the polling
   interval can be configured under Reaper settings.
