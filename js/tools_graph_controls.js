@@ -5,7 +5,6 @@ const IDS = {
   bypasser: "ReaperFastBypasser",
   repeater: "ReaperMuteBypassRepeater",
   collector: "ReaperNodeCollector",
-  reroute: "ReaperReroute",
 };
 const CONTROL_TYPES = new Set(Object.values(IDS));
 const MODE_ACTIVE = 0;
@@ -43,8 +42,7 @@ function upstreamNodes(node, seen = new Set()) {
   for (let i = 0; i < (node.inputs?.length || 0); i++) {
     const origin = originFor(node, i);
     if (!origin) continue;
-    if (origin.comfyClass === IDS.collector || origin.comfyClass === IDS.reroute ||
-        origin.type === IDS.collector || origin.type === IDS.reroute) {
+    if (origin.comfyClass === IDS.collector || origin.type === IDS.collector) {
       found.push(...upstreamNodes(origin, seen));
     } else {
       found.push(origin);
@@ -194,41 +192,6 @@ function installCollector(node) {
   installDynamicInputs(node);
 }
 
-function sourceSlotType(node) {
-  const graph = graphOf(node);
-  const link = node.inputs?.[0]?.link != null ? linkById(graph, node.inputs[0].link) : null;
-  if (!link) return "*";
-  const origin = graph?.getNodeById?.(link.origin_id);
-  return origin?.outputs?.[link.origin_slot]?.type || link.type || "*";
-}
-
-function updateRerouteType(node, seen = new Set()) {
-  if (!node || seen.has(node.id)) return;
-  seen.add(node.id);
-  const type = sourceSlotType(node);
-  if (node.inputs?.[0]) node.inputs[0].type = type;
-  if (node.outputs?.[0]) node.outputs[0].type = type;
-  for (const target of targetsFor(node)) {
-    if (target.comfyClass === IDS.reroute || target.type === IDS.reroute) {
-      updateRerouteType(target, seen);
-    }
-  }
-  graphOf(node)?.setDirtyCanvas?.(true, true);
-}
-
-function installReroute(node) {
-  markVirtual(node);
-  node.properties.resizable ??= false;
-  node.properties.layout ||= "Left/Right";
-  node.setSize?.([Math.max(40, node.size?.[0] || 40), Math.max(30, node.size?.[1] || 30)]);
-  const previous = node.onConnectionsChange;
-  node.onConnectionsChange = function () {
-    previous?.apply(this, arguments);
-    setTimeout(() => updateRerouteType(this), 0);
-  };
-  setTimeout(() => updateRerouteType(node), 0);
-}
-
 app.registerExtension({
   name: "Reaper.Tools.GraphControls",
 
@@ -247,7 +210,6 @@ app.registerExtension({
       else if (nodeData.name === IDS.bypasser) installModeController(this, MODE_BYPASS);
       else if (nodeData.name === IDS.repeater) installRepeater(this);
       else if (nodeData.name === IDS.collector) installCollector(this);
-      else if (nodeData.name === IDS.reroute) installReroute(this);
     };
 
     const previousMenu = nodeType.prototype.getExtraMenuOptions;
@@ -261,16 +223,6 @@ app.registerExtension({
           { content: "Toggle all", callback: () => this._reaperModeAction?.("Toggle all") },
           null,
         );
-      }
-      if (nodeData.name === IDS.reroute) {
-        options.unshift({
-          content: this.properties?.resizable ? "Use compact size" : "Allow resizing",
-          callback: () => {
-            this.properties.resizable = !this.properties.resizable;
-            this.resizable = this.properties.resizable;
-            if (!this.resizable) this.setSize?.([40, 30]);
-          },
-        });
       }
     };
   },

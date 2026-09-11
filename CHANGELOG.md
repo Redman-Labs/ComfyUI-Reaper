@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+## 0.20.2 - 2026-09-11
+
+- Added a new frontend-only `Reroute` under `Reaper/Tools`, adapted
+  from rgthree-comfy with type-aware passthrough, flexible resizing, label
+  display, twelve connection layouts, rotations, and horizontal/vertical flips.
+- Consolidated the reroute's former context submenus into one `Reroute Settings`
+  action that opens a ComfyUI-styled per-node settings dialog.
+- Removed LiteGraph's generic 140-pixel interactive minimum width from the
+  Reaper reroute so cursor resizing can shrink it back to 10 × 10 pixels.
+- Added a V3 metadata definition with the unique ID `ReaperReroute` and the
+  display name `Reroute`, preventing a collision with ComfyUI's built-in node
+  while keeping Node Manager and search labels clean.
+- Made the settings popup read and normalize Reaper's `Default Style` color
+  directly whenever it opens, independent of frontend extension load order.
+
+## 0.20.1 - 2026-09-11
+
+- Added the V3 `Any Switch Advanced (Reaper)` node under `Reaper/Switches`,
+  adapted from Switch Pixaroma. It supports up to 32 dynamic any-type inputs,
+  lazy active-branch execution, active-input selection, and output type matching.
+- Ported the complete Switch Pixaroma frontend for Classic and Nodes 2.0,
+  including connectable custom rows, per-row enable toggles, editable labels,
+  active-row highlighting, and automatic trailing-row growth.
+- Corrected its Python module name to `node_advanced_any_switch.py` so it uses
+  the same automatic node-discovery convention as the other Switches modules.
+- Added an rgthree-inspired Prompt Progress Bar using current ComfyUI frontend
+  events. It displays queue, node, active-node, and sampler-step progress and can
+  center the active node when clicked.
+- Added Reaper settings to enable the Prompt Progress Bar, choose Top or Bottom
+  placement, and set its integer pixel height with a slider and numeric box.
+- Corrected the visible Prompt Progress Bar settings order for ComfyUI's
+  reverse insertion behavior.
+- Added native color-picker settings for the Node Progress Bar and Step Progress
+  Bar, with immediate updates when either color changes.
+- Added the original rgthree-comfy MIT attribution.
+- Fixed Prompt Progress Bar colors disappearing after a picker change by
+  normalizing ComfyUI's persisted bare hexadecimal color values for CSS.
+- Fixed the Prompt Progress Bar layout so current ComfyUI reserves a dedicated
+  top or bottom grid row for it instead of overlaying the interface and canvas.
+- Removed only the `Reroute (Reaper)` node and its dedicated frontend behavior.
+  Shared graph-control functions used by the remaining Tools nodes are unchanged.
+- Updated the README catalog and project structure for 86 nodes and advanced the
+  package version to 0.20.1.
+
 ## 0.20.0 - 2026-09-10
 
 - Added V3 ports of `Krea2 Edit (source patch)` and `Krea2 Edit (grounded

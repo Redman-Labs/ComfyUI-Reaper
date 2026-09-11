@@ -1,8 +1,8 @@
 # ComfyUI-Reaper
 
-A collection of 85 modern ComfyUI V3 / Nodes 2.0 custom nodes for image, mask, model, latent, text, face, flow-control, Krea2, inpainting, and outpainting workflows.
+A collection of 86 modern ComfyUI V3 / Nodes 2.0 custom nodes for image, mask, model, latent, text, face, flow-control, Krea2, inpainting, and outpainting workflows.
 
-Current release: **0.20.0**
+Current release: **0.20.2**
 
 All nodes are grouped beneath the `Reaper` menu. Stable internal node IDs are retained when nodes move between categories so existing workflows continue to load.
 
@@ -22,6 +22,18 @@ D:\AI\ComfyUI\python_embeded\python.exe -m pip install -r D:\AI\ComfyUI\ComfyUI\
 ```
 
 Fully stop and restart ComfyUI after installing or updating the pack. Refreshing the browser alone does not reload Python nodes.
+
+## Prompt Progress Bar
+
+Reaper includes an rgthree-inspired Prompt Progress Bar that shows queued work, overall node progress, the currently executing node, and sampler-step progress. Click the bar while a prompt is running to center the active node in the workflow.
+
+Configure it in **ComfyUI Settings → Reaper → Prompt Progress Bar**:
+
+- **Enable Prompt Progress Bar** shows or hides the bar.
+- **Position** places it at the top or bottom of the ComfyUI window.
+- **Height** uses a slider with an integer box on its right and sets the height from 4 to 100 pixels.
+- **Node Progress Bar Color** opens a color picker for overall workflow-node progress.
+- **Step Progress Bar Color** opens a color picker for progress within the active node.
 
 ## Categories and nodes
 
@@ -145,10 +157,11 @@ Editable text gates, comments, and ordered find/replace processing.
 - **Pause Text (Reaper)** — Pauses a workflow so generated text can be reviewed and edited before downstream nodes run. Continue sends the edited text downstream while skipping its upstream generator. Regenerate requests fresh text, Pass runs end to end, and Keep reuses the current edited text on subsequent runs. The editor supports // line comments and /* block comments */;
 - **Text With Comments (Reaper)** — Provides a multiline text field where // line comments and /* block comments */ can be used for notes. Comments are removed from the text sent to downstream nodes, while comment markers inside quoted strings are preserved.
 
-### Reaper/Switches (7)
+### Reaper/Switches (8)
 
-Lazy two-way selectors for common ComfyUI data types.
+Lazy two-way selectors for common ComfyUI data types, plus a dynamic 32-input wildcard selector.
 
+- **Any Switch Advanced (Reaper)** — An any-type switch adapted from Switch Pixaroma. Its custom Classic and Nodes 2.0 interface provides per-row enable toggles, editable input labels, and a trailing empty row that grows as inputs are connected. It supports up to 32 inputs and evaluates only the selected lazy branch.
 - **Any Switch (Reaper)** — Selects one of two optional inputs of any ComfyUI data type. The two inputs may hold different types, and only the selected connected branch is evaluated before its value is passed through.
 - **CLIP Switch (Reaper)** — Selects CLIP 1 or CLIP 2 and passes only the selected text encoder object to the output using lazy branch evaluation.
 - **Image Switch (Reaper)** — Selects Image 1 or Image 2 and passes only the selected image or image batch to the output using lazy branch evaluation.
@@ -159,14 +172,14 @@ Lazy two-way selectors for common ComfyUI data types.
 
 ### Reaper/Tools (7)
 
-Graph-control, reroute, and virtual Set/Get utilities.
+Graph-control and virtual Set/Get utilities.
 
 - **Fast Bypasser (Reaper)** — Quickly bypass or enable connected nodes without executing itself.
 - **Fast Muter (Reaper)** — Quickly mute or enable connected nodes without executing itself.
 - **GetNode (Reaper)** — Reads the value from a named SetNode (Reaper) without drawing a cable across the workflow. Sets in parent graphs are visible inside nested subgraphs.
 - **Mute / Bypass Repeater (Reaper)** — Repeats its Active, Muted, or Bypassed mode to connected nodes.
 - **Node Collector (Reaper)** — Collects multiple graph-control connections into one output.
-- **Reroute (Reaper)** — A compact, type-aware reroute with configurable connection direction.
+- **Reroute** — A frontend-only, type-aware reroute adapted from rgthree-comfy. Its single **Reroute Settings** menu opens a ComfyUI-styled panel for label visibility, resizing, exact dimensions, twelve connection layouts, rotations, horizontal or vertical flips, and cloning before or after the current reroute. Popup accents follow **Settings → Reaper → Default Style**.
 - **SetNode (Reaper)** — Stores any connection under a name for one or more Get Reaper nodes. This is a virtual editor node, so its passthrough resolves directly to the original source.
 
 ### Reaper/VAE Utils (3)
@@ -249,10 +262,11 @@ ComfyUI-Reaper/
 │   ├── model_utilities/                # 3 node modules + shared helpers
 │   ├── pass_throughs/                  # 15 node modules + shared helpers
 │   ├── prompt_text_utilities/          # 3 node modules + shared helpers
-│   ├── switch_utilities/               # 7 node modules + shared helpers
+│   ├── switch_utilities/               # 8 node modules + shared helpers
 │   ├── utilities/                      # 6 modules; SetNode/GetNode share one module
 │   └── vae_utilities/                  # 3 node modules + shared helpers
 ├── js/
+│   ├── advanced_any_switch/
 │   ├── compare/ and compare_simple/
 │   ├── find_replace/
 │   ├── framework/
@@ -263,7 +277,9 @@ ComfyUI-Reaper/
 │   ├── outpaint/ and outpaint_stitch/
 │   ├── pass_throughs/
 │   ├── pause_image/, pause_image_compare/, and pause_text/
+│   ├── prompt_progress_bar/
 │   ├── resource_monitor/
+│   ├── reroute/
 │   ├── save_image/
 │   ├── set_get/
 │   ├── settings/
@@ -303,6 +319,7 @@ ComfyUI-Reaper itself is distributed under the GNU General Public License v3. Th
 - `ComfyUI-VAE-Utils-MIT.txt`
 - `SesquiLSR-MIT.txt`
 - `text-node-with-comments-MIT.txt`
+- `rgthree-comfy-MIT.txt`
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
